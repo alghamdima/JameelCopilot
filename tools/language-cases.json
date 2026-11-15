@@ -1,0 +1,53 @@
+[
+  {
+    "name": "arabic-question",
+    "messages": [
+      { "role": "user", "content": "لخص لي أهم ثلاث نصائح لكتابة بريد إلكتروني رسمي." }
+    ],
+    "expect": "ar",
+    "minArabic": 0.85
+  },
+  {
+    "name": "arabic-dialect",
+    "messages": [
+      { "role": "user", "content": "ابغى طريقة مختصرة ارد فيها على عميل زعلان" }
+    ],
+    "expect": "ar",
+    "minArabic": 0.85
+  },
+  {
+    "name": "arabic-with-english-terms",
+    "messages": [
+      { "role": "user", "content": "اشرح لي الفرق بين CC و BCC في Outlook" }
+    ],
+    "expect": "ar",
+    "minArabic": 0.6,
+    "mustContain": [ "CC", "BCC" ]
+  },
+  {
+    "name": "english-question",
+    "messages": [
+      { "role": "user", "content": "Give me three tips for writing a formal email." }
+    ],
+    "expect": "en"
+  },
+  {
+    "name": "arabic-about-english-email",
+    "context": "From: Sara Example <sara@example.com>\nSubject: Q3 invoice\nBody: Please confirm the invoice total of 4,200 by Thursday.",
+    "messages": [
+      { "role": "user", "content": "وش يبغى المرسل؟" }
+    ],
+    "expect": "ar",
+    "minArabic": 0.35,
+    "mustContain": [ "Sara" ]
+  },
+  {
+    "name": "english-after-arabic",
+    "messages": [
+      { "role": "user", "content": "مرحبا" },
+      { "role": "assistant", "content": "مرحبا، كيف أساعدك؟" },
+      { "role": "user", "content": "What can you do for my inbox?" }
+    ],
+    "expect": "en"
+  }
+]

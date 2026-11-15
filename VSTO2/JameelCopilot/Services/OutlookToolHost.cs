@@ -1,0 +1,67 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using JameelCopilot.Services.Tools;
+
+namespace JameelCopilot.Services
+{
+    /// <summary>
+    /// IToolHost implementation that aggregates the Phase 2+
+    /// <see cref="IOutlookTool"/>s and a single <see cref="IOutlookSurface"/>,
+    /// dispatching via <see cref="ToolDispatcher"/>. Write tools are included
+    /// conditionally based on the admin's tool-permission setting.
+    /// </summary>
+    public sealed class OutlookToolHost : IToolHost, IDisposable
+    {
+        private readonly ToolDispatcher _dispatcher;
+
+        public OutlookToolHost(IOutlookSurface surface, bool includeWriteTools)
+        {
+            var tools = new List<IOutlookTool>
+            {
+                new OutlookGetCurrentComposeStateTool(),
+                new OutlookGetCurrentSelectionTool(),    // Phase 3a
+                new OutlookListFoldersTool(),
+                new OutlookSearchMessagesTool(),
+                new OutlookReadMessageTool(),
+                new OutlookReadMessagesTool(),           // Phase 4: bulk read
+                new OutlookCountMessagesTool(),
+                new OutlookAggregateMessagesTool(),      // Phase 4: group + count
+                new OutlookListRecentThreadsWithTool(),
+                new OutlookExportExcelTool(),            // Phase 5: Excel export
+                new OutlookExportPdfTool(),              // Phase 5: PDF export
+                new OutlookExportSearchResultsTool(),    // v2.1.2: complete bulk list export
+                new RememberTool(),                      // proposes a memory note; the user saves it
+                new ListCalendarEventsTool(),            // the user's calendar
+                new FindMeetingTimesTool(),              // free/busy of the user and the attendees
+                new ProposeMeetingTool(),                // shows times; the user opens the meeting request
+                new ResolvePeopleTool(),                 // names to the address book's people
+                new FindRoomsTool(),                     // meeting rooms and whether they are free
+                new ProposeRuleTool(),                   // shows a rule; the user creates it
+            };
+            if (includeWriteTools)
+            {
+                // Per-tool gate against Config.EnabledWriteTools. Mirrors the
+                // gating in ToolCatalogSchema so the dispatcher never has a
+                // tool registered that the catalog didn't advertise.
+                var enabled = Config.EnabledWriteTools;
+
+                if (enabled.Contains("outlook_create_draft"))
+                    tools.Add(new OutlookCreateDraftTool());
+                if (enabled.Contains("outlook_mark_as_read"))
+                    tools.Add(new OutlookMarkAsReadTool());
+                if (enabled.Contains("outlook_flag_message"))
+                    tools.Add(new OutlookFlagMessageTool());
+                if (enabled.Contains("outlook_set_category"))
+                    tools.Add(new OutlookSetCategoryTool());
+            }
+            _dispatcher = new ToolDispatcher(tools, surface);
+        }
+
+        public Task<string> DispatchAsync(string toolName, string argsJson, CancellationToken ct)
+            => _dispatcher.DispatchAsync(toolName, argsJson, ct);
+
+        public void Dispose() { /* surface lifecycle is owned by ThisAddIn / pane */ }
+    }
+}

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jameel Copilot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-light">
+  <div id="app">
+    <header id="appHeader" class="app-header">
+      <img class="app-mark" src="jc-mark.svg" alt="Jameel Copilot">
+      <span class="header-actions">
+        <button id="btnNewChat" class="hdr-btn" type="button" title="Start a new chat. This one stays under Chats.">+ New</button>
+        <button id="btnChats" class="hdr-btn" type="button" title="Your saved chats">Chats</button>
+        <button id="btnMemory" class="hdr-btn" type="button" title="What Jameel Copilot remembers about you">Memory</button>
+      </span>
+      <label id="stylePicker" class="style-picker" hidden>
+        <select id="styleSelect" aria-label="Response style" title="Response style">
+          <option value="precise">Precise</option>
+          <option value="balanced">Balanced</option>
+          <option value="creative">Creative</option>
+        </select>
+      </label>
+    </header>
+
+    <!-- The conversation -->
+    <div id="viewChat" class="view">
+      <div id="contextStrip" class="context-strip">
+        <div class="context-line context-subject" id="ctxSubject" dir="auto">No subject</div>
+        <div class="context-line context-recipients" id="ctxRecipients" dir="auto"></div>
+        <div class="context-line context-thread" id="ctxThread" dir="auto"></div>
+      </div>
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+      <!-- Chips, in titled groups. The host fills them with
+           jameelcopilot.setQuickActions(); empty means no row at all. -->
+      <div id="quickActions" class="quick-actions"></div>
+      <div id="composer" class="composer">
+        <textarea id="composerInput"
+                  dir="auto"
+                  class="composer-input"
+                  rows="2"
+                  placeholder="Ask about this email or your mailbox..."
+                  aria-label="Chat input"></textarea>
+        <div class="composer-controls">
+          <button id="btnSend" class="btn btn-primary" type="button">Send</button>
+          <button id="btnDraft" class="btn btn-primary" type="button" title="Write the email from what you typed" hidden>Draft</button>
+          <button id="btnStop" class="btn btn-secondary" type="button" hidden>Stop</button>
+          <button id="btnCopy" class="btn btn-ghost" type="button" title="Copy conversation to clipboard">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Saved chats -->
+    <div id="viewChats" class="view" hidden>
+      <div class="panel-title">Chats<span class="panel-sub">Kept in your own mailbox, nowhere else.</span></div>
+      <div id="chatList" class="panel-list"></div>
+      <div class="panel-foot">
+        <button id="btnChatsBack" class="btn" type="button">Back to the chat</button>
+        <button id="btnClearChats" class="btn btn-ghost" type="button" title="Delete every saved chat">Clear all</button>
+      </div>
+    </div>
+
+    <!-- What Jameel Copilot remembers -->
+    <div id="viewMemory" class="view" hidden>
+      <div class="panel-title">Memory<span class="panel-sub">What Jameel Copilot should always know. Only you add, change or delete a note.</span></div>
+      <div class="memory-add">
+        <textarea id="memoryInput" dir="auto" class="composer-input" rows="2" maxlength="300"
+                  placeholder="For example: Reply to HR in Arabic. Keep my replies short."
+                  aria-label="New note"></textarea>
+        <button id="btnMemoryAdd" class="btn btn-primary" type="button">Remember</button>
+      </div>
+      <div id="memoryList" class="panel-list"></div>
+      <div class="panel-foot">
+        <button id="btnMemoryBack" class="btn" type="button">Back to the chat</button>
+        <span class="panel-note">Sent with each question.</span>
+      </div>
+    </div>
+
+    <!-- The user's own prompts: each one is a chip -->
+    <div id="viewPrompts" class="view" hidden>
+      <div class="panel-title">My prompts<span class="panel-sub">Requests you use often, as buttons of your own. Put [words in brackets] where you fill something in each time.</span></div>
+      <div class="memory-add">
+        <textarea id="promptInput" dir="auto" class="composer-input" rows="2" maxlength="300"
+                  placeholder="For example: Summarize what [name] sent me this week."
+                  aria-label="New prompt"></textarea>
+        <button id="btnPromptAdd" class="btn btn-primary" type="button">Save as a button</button>
+      </div>
+      <div id="promptList" class="panel-list"></div>
+      <div class="panel-foot">
+        <button id="btnPromptsBack" class="btn" type="button">Back to the chat</button>
+        <span class="panel-note">Kept in your own mailbox.</span>
+      </div>
+    </div>
+  </div>
+  <script src="markdown.js"></script>
+  <script src="chat.js"></script>
+</body>
+</html>

@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Jameel Copilot for Outlook: per-machine MSI.
+
+  Build with Installer\Build-Msi.ps1. Deployment, properties and key rotation
+  are described in Deploy\README.txt.
+
+  What it deliberately does not do:
+  - check for the VSTO runtime: Click-to-Run Office does not register its
+    copy where an installer can see it, so a check would block every PC;
+  - change the machine's ClickOnce/VSTO trust settings: trust comes from the
+    install location (Program Files, registered under HKLM) and the signed
+    manifests;
+  - close Outlook, or install or download any prerequisite.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Jameel Copilot"
+           Manufacturer="Jameel Copilot"
+           Version="$(var.JcVersion)"
+           UpgradeCode="D2979919-ADE1-4A9B-953B-970B96F42252"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+
+    <SummaryInformation Description="Jameel Copilot assistant for Outlook" />
+    <!-- The old version is removed before the new files go in, so no file
+         is left behind because its version number did not change. The
+         settings survive: they are read into properties (below) first. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Jameel Copilot is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Settings are changed by running the MSI again, not from Programs and Features. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Icon Id="JcIcon.ico" SourceFile="$(var.RepoDir)\VSTO2\JameelCopilot\Resources\jc.ico" />
+    <Property Id="ARPPRODUCTICON" Value="JcIcon.ico" />
+
+    <!-- ============================ Settings ============================
+         Public properties given on the command line by the administrator who
+         installs. On an upgrade, or when the MSI is run again to change one
+         setting, each property that was not given takes the value already in
+         the registry. The saved value goes into a separate *_SAVED property:
+         a search straight into the public property would overwrite what the
+         command line said.
+
+         None of them is marked Secure, on purpose. A standard user can start
+         a repair of an installed per-machine product and Windows Installer
+         runs it elevated; a Secure property would be taken from that user's
+         command line, and any user could repoint Jameel Copilot at another server. The
+         restore below therefore runs in both sequences. In a silent run the
+         elevated side reads the registry itself. In a run with a user
+         interface the search happens once, on the client, and a standard
+         user's values are not passed on: the elevated side then has no
+         settings, and the launch conditions stop it before anything is
+         written. -->
+    <!-- Hidden: Windows Installer masks these in its logs. -->
+    <Property Id="API_KEY" Hidden="yes" />
+    <Property Id="API_KEY_PROTECTED" Hidden="yes" />
+
+    <Property Id="API_BASE_URL_SAVED">
+      <RegistrySearch Id="SavedApiBaseUrl" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="ApiBaseUrl" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="MODEL_SAVED">
+      <RegistrySearch Id="SavedModel" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="Model" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="REASONING_EFFORT_SAVED">
+      <RegistrySearch Id="SavedReasoningEffort" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="ReasoningEffort" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="WRITE_TOOLS_SAVED">
+      <RegistrySearch Id="SavedWriteTools" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="EnabledWriteTools" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="MAX_BULK_EXPORT_ROWS_SAVED">
+      <RegistrySearch Id="SavedMaxRows" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="MaxBulkExportRows" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="TEMPERATURE_SAVED">
+      <RegistrySearch Id="SavedTemperature" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="Temperature" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="TEMPERATURE_MAX_SAVED">
+      <RegistrySearch Id="SavedTemperatureMax" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="TemperatureMax" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="MAX_OUTPUT_TOKENS_SAVED">
+      <RegistrySearch Id="SavedMaxOutputTokens" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="MaxOutputTokens" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="API_KEY_PROTECTED_SAVED" Hidden="yes">
+      <RegistrySearch Id="SavedApiKeyProtected" Root="HKLM" Key="SOFTWARE\JameelCopilot" Name="ApiKeyProtected" Type="raw" Bitness="always64" />
+    </Property>
+
+    <SetProperty Id="API_BASE_URL" Value="[API_BASE_URL_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT API_BASE_URL AND API_BASE_URL_SAVED" />
+    <SetProperty Id="MODEL" Value="[MODEL_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT MODEL AND MODEL_SAVED" />
+    <SetProperty Id="REASONING_EFFORT" Value="[REASONING_EFFORT_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT REASONING_EFFORT AND REASONING_EFFORT_SAVED" />
+    <SetProperty Id="WRITE_TOOLS" Value="[WRITE_TOOLS_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT WRITE_TOOLS AND WRITE_TOOLS_SAVED" />
+    <SetProperty Id="MAX_BULK_EXPORT_ROWS" Value="[MAX_BULK_EXPORT_ROWS_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT MAX_BULK_EXPORT_ROWS AND MAX_BULK_EXPORT_ROWS_SAVED" />
+    <SetProperty Id="TEMPERATURE" Value="[TEMPERATURE_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT TEMPERATURE AND TEMPERATURE_SAVED" />
+    <SetProperty Id="TEMPERATURE_MAX" Value="[TEMPERATURE_MAX_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT TEMPERATURE_MAX AND TEMPERATURE_MAX_SAVED" />
+    <SetProperty Id="MAX_OUTPUT_TOKENS" Value="[MAX_OUTPUT_TOKENS_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT MAX_OUTPUT_TOKENS AND MAX_OUTPUT_TOKENS_SAVED" />
+    <!-- A new API_KEY replaces the saved one; without it the saved one stays. -->
+    <SetProperty Id="API_KEY_PROTECTED" Value="[API_KEY_PROTECTED_SAVED]" After="AppSearch" Sequence="both"
+                 Condition="NOT API_KEY AND API_KEY_PROTECTED_SAVED" />
+
+    <!-- Running the installed MSI again (to change a setting or the key) is
+         a maintenance run, in which Windows Installer writes nothing unless
+         a reinstall is asked for. Ask for it here, so that the short command
+         in the deployment guide works; "m" is what rewrites the HKLM values. -->
+    <SetProperty Id="REINSTALL" Value="ALL" Before="CostInitialize" Sequence="both"
+                 Condition="Installed AND NOT REMOVE AND NOT REINSTALL" />
+    <SetProperty Id="REINSTALLMODE" Value="omus" Before="CostInitialize" Sequence="both"
+                 Condition="Installed AND NOT REMOVE AND NOT REINSTALLMODE" />
+
+    <!-- ========================= Requirements ========================= -->
+    <Property Id="WINDOWS10PLUS">
+      <RegistrySearch Id="Windows10Search" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentMajorVersionNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="WEBVIEW2_MACHINE32">
+      <RegistrySearch Id="WebView2Search32" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv" Type="raw" Bitness="always32" />
+    </Property>
+    <Property Id="WEBVIEW2_MACHINE64">
+      <RegistrySearch Id="WebView2Search64" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv" Type="raw" Bitness="always64" />
+    </Property>
+    <PropertyRef Id="WIX_IS_NETFRAMEWORK_472_OR_LATER_INSTALLED" />
+
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWS10PLUS)"
+            Message="Jameel Copilot needs 64-bit Windows 10 or later." />
+    <Launch Condition="Installed OR WIX_IS_NETFRAMEWORK_472_OR_LATER_INSTALLED"
+            Message="Jameel Copilot needs .NET Framework 4.7.2 or later." />
+    <Launch Condition="Installed OR WEBVIEW2_MACHINE32 OR WEBVIEW2_MACHINE64"
+            Message="Jameel Copilot needs the Microsoft Edge WebView2 Runtime. Install it, then run this installer again." />
+    <!-- The settings are checked on every run except an uninstall, so a
+         run that would write an empty or invalid one stops instead. -->
+    <Launch Condition="REMOVE~=&quot;ALL&quot; OR (API_BASE_URL ~&lt;&lt; &quot;https://&quot;)"
+            Message="API_BASE_URL is required and must begin with https:// (example: API_BASE_URL=https://llm.example.internal/v1)." />
+    <Launch Condition="REMOVE~=&quot;ALL&quot; OR MODEL"
+            Message="MODEL is required (the model ID Jameel Copilot sends with every request)." />
+    <Launch Condition="REMOVE~=&quot;ALL&quot; OR API_KEY OR API_KEY_PROTECTED"
+            Message="API_KEY is required on the first install." />
+
+    <!-- ====================== Encrypt the API key ======================
+         Runs before anything is written: turns API_KEY into the machine-
+         encrypted API_KEY_PROTECTED and clears API_KEY. -->
+    <Binary Id="JcInstallerActions" SourceFile="$(var.ActionsCaDll)" />
+    <CustomAction Id="ProtectApiKey" BinaryRef="JcInstallerActions" DllEntry="ProtectApiKey"
+                  Execute="immediate" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="ProtectApiKey" After="InstallValidate" Condition="API_KEY AND NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <!-- ============================= Files ============================= -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="JameelCopilot" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AddInFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.AddInDir)\**">
+        <Exclude Files="$(var.AddInDir)\**\*.pdb" />
+        <Exclude Files="$(var.AddInDir)\**\*.xml" />
+      </Files>
+      <Component Id="LicenseFile" Guid="8EDFD0E9-4F7C-4B21-A509-1EF4B1B6E73E">
+        <File Id="LicenseTxt" Source="$(var.RepoDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ========================== Registration ==========================
+         Outlook reads the 64-bit or the 32-bit registry depending on its
+         own bitness, so the add-in is registered in both. LoadBehavior 3 =
+         load at start-up. "|vstolocal" = load from this folder. -->
+    <Component Id="AddInRegistration64" Directory="INSTALLFOLDER" Bitness="always64" Guid="63095EA6-CB28-411F-8E9A-2B7F213E8CFE">
+      <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Outlook\Addins\JameelCopilot">
+        <RegistryValue Name="Description" Type="string" Value="Jameel Copilot assistant for Outlook" />
+        <RegistryValue Name="FriendlyName" Type="string" Value="Jameel Copilot" />
+        <RegistryValue Name="LoadBehavior" Type="integer" Value="3" KeyPath="yes" />
+        <RegistryValue Name="Manifest" Type="string" Value="file:///[INSTALLFOLDER]JameelCopilot.vsto|vstolocal" />
+      </RegistryKey>
+      <!-- Keeps Outlook from switching the add-in off after one slow mailbox search. -->
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Office\16.0\Outlook\Resiliency\DoNotDisableAddinList"
+                     Name="JameelCopilot" Type="integer" Value="1" />
+    </Component>
+
+    <Component Id="AddInRegistration32" Directory="ProgramFilesFolder" Bitness="always32" Guid="930ECC3A-48CD-4357-9D63-8EB14A9684CF">
+      <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Outlook\Addins\JameelCopilot">
+        <RegistryValue Name="Description" Type="string" Value="Jameel Copilot assistant for Outlook" />
+        <RegistryValue Name="FriendlyName" Type="string" Value="Jameel Copilot" />
+        <RegistryValue Name="LoadBehavior" Type="integer" Value="3" KeyPath="yes" />
+        <RegistryValue Name="Manifest" Type="string" Value="file:///[INSTALLFOLDER]JameelCopilot.vsto|vstolocal" />
+      </RegistryKey>
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Office\16.0\Outlook\Resiliency\DoNotDisableAddinList"
+                     Name="JameelCopilot" Type="integer" Value="1" />
+    </Component>
+
+    <!-- The settings the add-in reads (64-bit view, also from a 32-bit
+         Outlook). Removed with the product, key included. -->
+    <Component Id="MachineSettings" Directory="INSTALLFOLDER" Bitness="always64" Guid="78011615-6F64-4219-9807-9F3B91785513">
+      <RegistryKey Root="HKLM" Key="SOFTWARE\JameelCopilot" ForceDeleteOnUninstall="yes">
+        <RegistryValue Name="ApiBaseUrl" Type="string" Value="[API_BASE_URL]" KeyPath="yes" />
+        <RegistryValue Name="ApiKeyProtected" Type="string" Value="[API_KEY_PROTECTED]" />
+        <RegistryValue Name="Model" Type="string" Value="[MODEL]" />
+        <RegistryValue Name="ReasoningEffort" Type="string" Value="[REASONING_EFFORT]" />
+        <RegistryValue Name="EnabledWriteTools" Type="string" Value="[WRITE_TOOLS]" />
+        <RegistryValue Name="MaxBulkExportRows" Type="string" Value="[MAX_BULK_EXPORT_ROWS]" />
+        <RegistryValue Name="Temperature" Type="string" Value="[TEMPERATURE]" />
+        <RegistryValue Name="TemperatureMax" Type="string" Value="[TEMPERATURE_MAX]" />
+        <RegistryValue Name="MaxOutputTokens" Type="string" Value="[MAX_OUTPUT_TOKENS]" />
+      </RegistryKey>
+    </Component>
+
+    <Feature Id="Main" Title="Jameel Copilot" Level="1">
+      <ComponentGroupRef Id="AddInFiles" />
+      <ComponentRef Id="AddInRegistration64" />
+      <ComponentRef Id="AddInRegistration32" />
+      <ComponentRef Id="MachineSettings" />
+    </Feature>
+  </Package>
+</Wix>

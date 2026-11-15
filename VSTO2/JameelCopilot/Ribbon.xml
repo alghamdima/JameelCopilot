@@ -1,0 +1,50 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_Load">
+	<ribbon>
+		<tabs>
+			<!-- Compose window. -->
+			<tab idMso="TabNewMailMessage">
+				<group id="AIAssistantGroup" label="Jameel Copilot" insertAfterMso="GroupClipboard">
+					<button id="btnAIAssistant"
+							getLabel="GetNoLabel"
+							screentip="Jameel Copilot"
+							size="normal"
+							showLabel="false"
+							onAction="OnAIAssistantClick"
+							supertip="Open Jameel Copilot to help proofread, revise, and write emails."
+							getImage="GetJcImage" />
+					<button id="btnSettings"
+							getLabel="GetNoLabel"
+							screentip="About Jameel Copilot"
+							size="normal"
+							showLabel="false"
+							onAction="OnSettingsClick"
+							supertip="Version, AI service and connection test."
+							imageMso="CurrentViewSettings" />
+				</group>
+			</tab>
+			<!-- Inbox view. The assistant button uses the same handler;
+			     ThisAddIn.ShowTaskPane routes on Application.ActiveWindow(). -->
+			<tab idMso="TabMail">
+				<group id="AIAssistantExplorerGroup" label="Jameel Copilot" insertAfterMso="GroupMailMove">
+					<button id="btnAIAssistantExplorer"
+							getLabel="GetNoLabel"
+							screentip="Jameel Copilot"
+							size="normal"
+							showLabel="false"
+							onAction="OnAIAssistantClick"
+							supertip="Open Jameel Copilot: ask about your mailbox, summarize, draft replies and run reports."
+							getImage="GetJcImage" />
+					<button id="btnSettingsExplorer"
+							getLabel="GetNoLabel"
+							screentip="About Jameel Copilot"
+							size="normal"
+							showLabel="false"
+							onAction="OnSettingsClick"
+							supertip="Version, AI service and connection test."
+							imageMso="CurrentViewSettings" />
+				</group>
+			</tab>
+		</tabs>
+	</ribbon>
+</customUI>

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The MSI's one custom action. The build also produces
+       JameelCopilot.Installer.Actions.CA.dll, the file the MSI embeds. -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>JameelCopilot.Installer.Actions</AssemblyName>
+    <RootNamespace>JameelCopilot.Installer.Actions</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Dtf.CustomAction" Version="5.0.2" />
+    <Reference Include="System.Security" />
+    <!-- The same source file the add-in decrypts with: one key format, written once. -->
+    <Compile Include="..\..\VSTO2\JameelCopilot\Services\ApiKeyProtector.cs" Link="ApiKeyProtector.cs" />
+    <Content Include="CustomAction.config" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- Windows Installer unpacks and loads both: the action's DLL and the
+       package around it. Installer\Build-Msi.ps1 passes the certificate. -->
+  <Target Name="JcSignAction" BeforeTargets="PackCustomAction" Condition="'$(JcCertThumbprint)' != ''">
+    <SignFile CertificateThumbprint="$(JcCertThumbprint)" SigningTarget="@(IntermediateAssembly)" TimestampUrl="$(JcTimestampUrl)" TargetFrameworkVersion="v4.7.2" />
+  </Target>
+  <Target Name="JcSignActionPackage" AfterTargets="PackCustomAction" Condition="'$(JcCertThumbprint)' != ''">
+    <SignFile CertificateThumbprint="$(JcCertThumbprint)" SigningTarget="$(IntermediateOutputPath)$(TargetCAFileName)" TimestampUrl="$(JcTimestampUrl)" TargetFrameworkVersion="v4.7.2" />
+  </Target>
+</Project>

@@ -1,0 +1,22 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!--
+    Build through Installer\Build-Msi.ps1, which builds the add-in and the
+    custom-action project first and passes JcVersion.
+
+    WiX 5 is used on purpose: WiX 6 and later require a paid maintenance fee
+    from organisations that generate revenue.
+  -->
+  <PropertyGroup>
+    <JcVersion Condition="'$(JcVersion)' == ''">1.0.0</JcVersion>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>JameelCopilot-$(JcVersion)-x64</OutputName>
+    <AddInDir Condition="'$(AddInDir)' == ''">$(MSBuildProjectDirectory)\..\VSTO2\JameelCopilot\bin\Release</AddInDir>
+    <ActionsCaDll Condition="'$(ActionsCaDll)' == ''">$(MSBuildProjectDirectory)\Actions\bin\Release\net472\JameelCopilot.Installer.Actions.CA.dll</ActionsCaDll>
+    <DefineConstants>JcVersion=$(JcVersion);AddInDir=$(AddInDir);ActionsCaDll=$(ActionsCaDll);RepoDir=$(MSBuildProjectDirectory)\..</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Package.wxs" />
+    <PackageReference Include="WixToolset.Netfx.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>
