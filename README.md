@@ -169,7 +169,7 @@ On a PC with Outlook, from an elevated PowerShell:
 It writes the same registry values the MSI writes and asks for the key
 (typed hidden), or reads it from a git-ignored `jameelcopilot.local.json`
 (`{ "apiKey": "..." }`) in the repository root. Then install an MSI built
-from your branch without `API_KEY`: it keeps the settings already there.
+from your branch without `API_KEY_FILE`: it keeps the settings already there.
 
 `tools\Probe-CustomApi.ps1` asks the model for two tool calls, sends the results
 back, and prints what the Custom API answers. Use it to check that a model

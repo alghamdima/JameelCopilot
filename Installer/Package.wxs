@@ -144,17 +144,18 @@
             Message="API_BASE_URL is required and must begin with https:// (example: API_BASE_URL=https://llm.example.internal/v1)." />
     <Launch Condition="REMOVE~=&quot;ALL&quot; OR MODEL"
             Message="MODEL is required (the model ID Jameel Copilot sends with every request)." />
-    <Launch Condition="REMOVE~=&quot;ALL&quot; OR API_KEY OR API_KEY_PROTECTED"
-            Message="API_KEY is required on the first install." />
+    <Launch Condition="REMOVE~=&quot;ALL&quot; OR API_KEY_FILE OR API_KEY OR API_KEY_PROTECTED"
+            Message="API_KEY_FILE is required on the first install: the name of a file next to the MSI that holds the key." />
 
     <!-- ====================== Encrypt the API key ======================
-         Runs before anything is written: turns API_KEY into the machine-
-         encrypted API_KEY_PROTECTED and clears API_KEY. -->
+         Runs before anything is written: turns API_KEY, or the key in the
+         file API_KEY_FILE names, into the machine-encrypted
+         API_KEY_PROTECTED and clears API_KEY. -->
     <Binary Id="JcInstallerActions" SourceFile="$(var.ActionsCaDll)" />
     <CustomAction Id="ProtectApiKey" BinaryRef="JcInstallerActions" DllEntry="ProtectApiKey"
                   Execute="immediate" Return="check" />
     <InstallExecuteSequence>
-      <Custom Action="ProtectApiKey" After="InstallValidate" Condition="API_KEY AND NOT REMOVE" />
+      <Custom Action="ProtectApiKey" After="InstallValidate" Condition="(API_KEY OR API_KEY_FILE) AND NOT REMOVE" />
     </InstallExecuteSequence>
 
     <!-- ============================= Files ============================= -->

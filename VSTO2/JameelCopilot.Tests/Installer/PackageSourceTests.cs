@@ -247,7 +247,7 @@ namespace JameelCopilot.Tests.Installer
 
             Assert.Contains(conditions, c => c.Contains("API_BASE_URL") && c.Contains("https://"));
             Assert.Contains(conditions, c => c.Contains("MODEL"));
-            Assert.Contains(conditions, c => c.Contains("API_KEY") && c.Contains("API_KEY_PROTECTED"));
+            Assert.Contains(conditions, c => c.Contains("API_KEY_FILE") && c.Contains("API_KEY_PROTECTED"));
             Assert.All(All("Launch"), l => Assert.False(string.IsNullOrWhiteSpace((string)l.Attribute("Message"))));
         }
 
@@ -296,6 +296,7 @@ namespace JameelCopilot.Tests.Installer
             var scheduled = All("InstallExecuteSequence").Elements(Wix + "Custom")
                 .Single(c => (string)c.Attribute("Action") == "ProtectApiKey");
             Assert.Contains("API_KEY", (string)scheduled.Attribute("Condition"));
+            Assert.Contains("API_KEY_FILE", (string)scheduled.Attribute("Condition"));
         }
 
         // One implementation of the key format, shared with the add-in.
@@ -308,6 +309,9 @@ namespace JameelCopilot.Tests.Installer
             Assert.Contains(@"..\..\VSTO2\JameelCopilot\Services\ApiKeyProtector.cs", project);
             Assert.Contains("ApiKeyProtector.Protect(", action);
             Assert.DoesNotContain("session.Log(key", action);
+            // The key file is read next to the MSI, not in the action's working folder (System32).
+            Assert.Contains("session[\"API_KEY_FILE\"]", action);
+            Assert.Contains("session[\"OriginalDatabase\"]", action);
         }
 
         // The developer script writes the same values the MSI does.

@@ -38,7 +38,21 @@ namespace JameelCopilot.Tests
             Assert.DoesNotContain("redeploy the command", sccm);
             Assert.Contains("only on a PC where detection says Jameel Copilot is not installed", sccm);
             Assert.Contains("\"Always rerun program\"", sccm);
-            Assert.Contains("msiexec /i JameelCopilot-<version>-x64.msi API_KEY=<new key> /qn", sccm);
+            Assert.Contains("msiexec /i JameelCopilot-<version>-x64.msi API_KEY_FILE=jc-key.txt /qn", sccm);
+        }
+
+        // A key on the command line reached the security team's monitoring
+        // through process auditing (event 4688). Every command the guide
+        // gives names a key file instead.
+        [Fact]
+        public void NoCommandInTheGuide_CarriesTheKeyItself()
+        {
+            // A command and the lines it continues with a trailing ^.
+            var commands = Regex.Matches(Guide, @"msiexec /i[^\n]*(\^\n[^\n]*)*");
+            Assert.NotEmpty(commands);
+            foreach (Match command in commands)
+                Assert.DoesNotContain("API_KEY=", command.Value);
+            Assert.Contains("API_KEY_FILE=jc-key.txt", Section("INSTALL"));
         }
 
         // The upgrade's Application also lands on PCs without Jameel Copilot, and an

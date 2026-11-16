@@ -41,13 +41,17 @@ through your deployment tool (Intune, Configuration Manager, Group Policy).
 
   msiexec /i JameelCopilot-1.0.0-x64.msi /qn ^
       API_BASE_URL=https://llm.example.internal/v1 ^
-      API_KEY=<the key for Jameel Copilot> ^
+      API_KEY_FILE=jc-key.txt ^
       MODEL=<model id>
 
 Required on the first install:
 
   API_BASE_URL   The Custom API base address. Must begin with https://
-  API_KEY        The key Jameel Copilot uses. Stored encrypted; see THE API KEY.
+  API_KEY_FILE   The name of a text file next to the MSI that holds the key
+                 Jameel Copilot uses, and nothing else (spaces and line
+                 breaks around it are ignored). A full path works too.
+                 Stored encrypted; see THE API KEY. If the file is missing
+                 or empty, the install stops (exit code 1603).
   MODEL          The model ID sent with every request. The model must
                  support tool calling, or the mailbox features will not work.
 
@@ -90,11 +94,14 @@ time Outlook starts: an "Jameel Copilot" group on the Home tab and in new-messag
 To keep a log, add:  /l*v install.log
 The key is masked in that log.
 
-The command line itself is not masked. Whatever records command lines will
-record the key in plain text: your deployment tool's package definition and
-its logs, and Windows process-creation auditing (event 4688) or an EDR agent
-if they capture command lines. Limit who can read those, keep the key out of
-scripts in shared folders, and rotate the key if such a record is exposed.
+Never put the key itself on the command line (API_KEY=<key> is still
+accepted, for a test PC). Whatever records command lines records it in plain
+text: your deployment tool's package definition and its logs, and Windows
+process-creation auditing (event 4688) or an EDR agent, which send it on to
+your security monitoring. With API_KEY_FILE they record only the file's
+name. Keep the file in the package's source folder, readable only by the
+deployment team and the deployment tool's accounts, and rotate the key if it
+was ever on a command line.
 
 
 WHERE THINGS ARE
@@ -136,7 +143,7 @@ CHANGE A SETTING OR ROTATE THE KEY
 Run the MSI that is already installed again, with the setting to change.
 Everything you do not pass stays as it is.
 
-  New key:    msiexec /i JameelCopilot-1.0.0-x64.msi /qn API_KEY=<new key>
+  New key:    msiexec /i JameelCopilot-1.0.0-x64.msi /qn API_KEY_FILE=jc-key.txt
   New model:  msiexec /i JameelCopilot-1.0.0-x64.msi /qn MODEL=<model id>
 
 Run it as administrator or through your deployment tool, silently (/qn) as
@@ -153,7 +160,8 @@ Jameel Copilot has no management console of its own: Configuration Manager is th
 
 Install
   Create an Application from the MSI. Installation program: the silent
-  command from INSTALL, with your address, key and model. Install for system,
+  command from INSTALL, with your address and model, and the key file in
+  the Application's content folder next to the MSI. Install for system,
   whether or not a user is logged on.
 
 Detection
@@ -189,10 +197,11 @@ Change a setting for everyone
 
 Rotate the key
   Only through the MSI, and for the same reason not by editing the
-  Application. Deploy a Package whose Program is
-      msiexec /i JameelCopilot-<version>-x64.msi API_KEY=<new key> /qn
+  Application. Deploy a Package that holds the MSI and a file with the new
+  key, whose Program is
+      msiexec /i JameelCopilot-<version>-x64.msi API_KEY_FILE=jc-key.txt /qn
   to the PCs that have Jameel Copilot (Required, "Always rerun program"), then put the
-  new key in the Application's command for the PCs that get Jameel Copilot later. The
+  new key in the Application's key file for the PCs that get Jameel Copilot later. The
   key is encrypted separately on each PC, so a value copied from one PC does
   not work on another.
 
@@ -210,10 +219,11 @@ Keep Jameel Copilot enabled
   MSI does not set it: it is a per-user policy and yours to decide.
 
 The key in SCCM
-  The command line of the Application or the Package holds the key in plain
-  text, and the client logs under C:\Windows\CCM\Logs on every PC record
-  that command line (AppEnforce.log for an Application, execmgr.log for a
-  Package). Limit who can edit and read them, and make the key a restricted
+  The client logs under C:\Windows\CCM\Logs on every PC record the command
+  line (AppEnforce.log for an Application, execmgr.log for a Package), so
+  the key goes in the key file, never on the command line. The file sits in
+  the content source, on the distribution points and in each PC's client
+  cache: limit who can read the source folder, and make the key a restricted
   one (see THE API KEY): for Jameel Copilot only, with a budget and a rate limit,
   accepted only from the company network.
 
@@ -392,6 +402,8 @@ rollout. Each line should be true.
   [ ] Installing with API_BASE_URL=http://... is refused (exit code 1603) and
       nothing is installed.
   [ ] An install log (/l*v) does not contain the key.
+  [ ] Installing with API_KEY_FILE naming a file that does not exist is
+      refused (exit code 1603).
   [ ] Outlook starts with no trust or security prompt about Jameel Copilot.
   [ ] After five starts of Outlook there is no yellow bar saying Jameel Copilot was
       disabled, and event 45 (Application log, source Outlook) shows Jameel Copilot's
@@ -480,8 +492,9 @@ rollout. Each line should be true.
   [ ] Installing the same MSI again with only MODEL=<other> changes the
       model in About Jameel Copilot and keeps the address and the key (Test connection
       still says "Connection OK.").
-  [ ] Installing the same MSI again with only API_KEY=<another valid key>
-      keeps the address and the model, and Test connection still passes.
+  [ ] Installing the same MSI again with only API_KEY_FILE=<a file with
+      another valid key> keeps the address and the model, and Test
+      connection still passes.
   [ ] The same command run by a standard user (not an administrator) does
       not change the model.
   [ ] Installing a higher version over it (build one with -Version 1.0.1)
