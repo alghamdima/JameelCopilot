@@ -95,11 +95,27 @@ namespace JameelCopilot.Services
             for (var round = 1; round <= MaxToolRounds; round++)
             {
                 result.RoundsUsed = round;
+                var messages = ChatCompletionsWire.ToMessages(
+                    SystemPromptBuilder.Build(context.UseTools && !context.Structured, context.SystemInstructions, context.Context, DateTimeOffset.Now, context.Memory, context.Structured),
+                    context.History);
+                if (context.UseTools && !context.Structured && string.IsNullOrWhiteSpace(context.Memory) && messages.Count > 2)
+                {
+                    var latestLang = DetectPromptLanguage(userMessage);
+                    if (latestLang != null && (userMessage ?? "").IndexOf("Translate ", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        var sysToken = messages[0] as JObject;
+                        if (sysToken != null && (string)sysToken["role"] == "system")
+                        {
+                            sysToken["content"] = ((string)sysToken["content"] ?? "")
+                                + "\n\nIMPORTANT FOR THIS TURN: The user's latest message is written in " + latestLang
+                                + ". Reply strictly in " + latestLang
+                                + " (even if the email body, subject, tool outputs, or earlier chat turns are in another language).";
+                        }
+                    }
+                }
                 var body = ChatCompletionsWire.BuildRequest(
                     Config.Model,
-                    ChatCompletionsWire.ToMessages(
-                        SystemPromptBuilder.Build(context.UseTools && !context.Structured, context.SystemInstructions, context.Context, DateTimeOffset.Now, context.Memory, context.Structured),
-                        context.History),
+                    messages,
                     context.UseTools
                         ? ChatCompletionsWire.ToTools(ToolCatalogSchema.BuildResponsesToolsArray(context.IncludeWriteTools))
                         : null,
@@ -204,6 +220,19 @@ namespace JameelCopilot.Services
             return result;
         }
 
+        internal static string DetectPromptLanguage(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            int arabic = 0, latin = 0;
+            foreach (var c in text)
+            {
+                if (c >= '\u0600' && c <= '\u06FF') arabic++;
+                else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) latin++;
+            }
+            if (arabic + latin == 0) return null;
+            return arabic > 0 && arabic >= latin / 4 ? "Arabic" : "English";
+        }
+
         // One request and its answer. Never throws for a failed or cancelled
         // request: the answer says what happened.
         private async Task<Answer> SendAsync(
@@ -222,8 +251,49 @@ namespace JameelCopilot.Services
                     {
                         if (!response.IsSuccessStatusCode)
                         {
+                            var code = (int)response.StatusCode;
+                            if (code == 500 || code == 502 || code == 503 || code == 504)
+                            {
+                                TraceLog.Write("Transient HTTP " + code + "; retrying once", "CustomApi");
+                                try { await Task.Delay(350, cancellationToken).ConfigureAwait(false); } catch { }
+                                using (var retryReq = new HttpRequestMessage(HttpMethod.Post, Config.ApiBaseUrl.AbsoluteUri.TrimEnd('/') + "/chat/completions"))
+                                {
+                                    retryReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Config.ApiKey);
+                                    retryReq.Content = new StringContent(body.ToString(Formatting.None), Encoding.UTF8, "application/json");
+                                    using (var retryResp = await _http.SendAsync(retryReq, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
+                                    {
+                                        if (retryResp.IsSuccessStatusCode)
+                                        {
+                                            using (cancellationToken.Register(() => retryResp.Dispose()))
+                                            {
+                                                var retryMedia = retryResp.Content.Headers.ContentType?.MediaType;
+                                                if (string.Equals(retryMedia, "application/json", StringComparison.OrdinalIgnoreCase))
+                                                {
+                                                    FeedWholeAnswer(reader, await retryResp.Content.ReadAsStringAsync().ConfigureAwait(false));
+                                                }
+                                                else
+                                                {
+                                                    using (var stream = await retryResp.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                                                    using (var lines = new StreamReader(stream, Encoding.UTF8))
+                                                    {
+                                                        string line;
+                                                        while (!reader.Done && reader.Error == null
+                                                            && (line = await lines.ReadLineAsync().ConfigureAwait(false)) != null)
+                                                        {
+                                                            cancellationToken.ThrowIfCancellationRequested();
+                                                            reader.Feed(line);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if (reader.Error != null) return Answer.Fail(ApiErrors.ErrorInAnswer);
+                                            return new Answer(reader.Text, reader.ToolCalls, null, cancelled: false);
+                                        }
+                                    }
+                                }
+                            }
                             // The body may repeat mail content or internals: it is neither shown nor logged.
-                            TraceLog.Write("Request failed: HTTP " + (int)response.StatusCode, "CustomApi");
+                            TraceLog.Write("Request failed: HTTP " + code, "CustomApi");
                             return Answer.Fail(ApiErrors.ForStatus(response.StatusCode, RetryAfterOf(response)));
                         }
 
@@ -426,9 +496,9 @@ namespace JameelCopilot.Services
                 case ActionType.Friendly:
                     return "You are a professional editor. Rewrite this email in a warmer, friendlier tone while remaining professional. Return only the rewritten email text.";
                 case ActionType.Arabic:
-                    return "You are a professional translator. Translate this email into Arabic: natural, professional Arabic, not word for word. Keep names, email addresses, numbers and dates as they are. Return only the translated email text.";
+                    return "You are a professional translator. Translate this email into Arabic: natural, professional Arabic, not word for word. Keep names, email addresses, numbers and dates as they are. Do not include or translate any email signature, sign-off, or classification footer. Return only the translated email body.";
                 case ActionType.English:
-                    return "You are a professional translator. Translate this email into English: natural, professional English, not word for word. Keep names, email addresses, numbers and dates as they are. Return only the translated email text.";
+                    return "You are a professional translator. Translate this email into English: natural, professional English, not word for word. Keep names, email addresses, numbers and dates as they are. Do not include or translate any email signature, sign-off, or classification footer. Return only the translated email body.";
                 case ActionType.Custom:
                 default:
                     return "You are a professional email writing assistant. Help the user with their email based on their instructions. Return only the result.";

@@ -18,7 +18,8 @@ namespace JameelCopilot.Services.Tools
         public static SearchResult Project(
             IEnumerable<MessageProjectionInput> items,
             SearchMessagesArgs args,
-            IFolderClassifier classifier)
+            IFolderClassifier classifier,
+            Action betweenSnippets = null)
         {
             items = items ?? new MessageProjectionInput[0];
             args = args ?? new SearchMessagesArgs();
@@ -39,11 +40,16 @@ namespace JameelCopilot.Services.Tools
             var top = orderedList.Take(maxResults).ToList();
 
             var output = new List<MessageSummary>(top.Count);
+            int count = 0;
             foreach (var i in top)
             {
                 string snippet = "";
                 try { snippet = i.SnippetFactory != null ? (i.SnippetFactory() ?? "") : ""; }
                 catch { snippet = ""; }
+                if ((++count % 3) == 0 && betweenSnippets != null)
+                {
+                    try { betweenSnippets(); } catch { }
+                }
 
                 output.Add(new MessageSummary
                 {

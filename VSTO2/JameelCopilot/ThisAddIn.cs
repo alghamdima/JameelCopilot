@@ -221,7 +221,7 @@ namespace JameelCopilot
             var taskPaneControl = new AITaskPane();
             taskPaneControl.Bind(inspector);
             var customTaskPane = this.CustomTaskPanes.Add(taskPaneControl, "Jameel Copilot", inspector);
-            customTaskPane.Width = 340;
+            customTaskPane.Width = 400;
             customTaskPane.Visible = true;
             TraceLog.Write("Inspector CustomTaskPane.Visible = true", "ThisAddIn");
         }
@@ -230,18 +230,22 @@ namespace JameelCopilot
         {
             foreach (CustomTaskPane pane in this.CustomTaskPanes)
             {
-                if (pane.Window == explorer && pane.Control is InboxCopilotPane)
+                try
                 {
-                    TraceLog.Write("Reusing existing Explorer CustomTaskPane (toggle visibility)", "ThisAddIn");
-                    pane.Visible = !pane.Visible;
-                    return;
+                    if (pane.Window == explorer && pane.Control is InboxCopilotPane)
+                    {
+                        TraceLog.Write("Reusing existing Explorer CustomTaskPane (toggle visibility)", "ThisAddIn");
+                        pane.Visible = !pane.Visible;
+                        return;
+                    }
                 }
+                catch (System.Runtime.InteropServices.COMException) { }
             }
             TraceLog.Write("Creating new InboxCopilotPane for Explorer", "ThisAddIn");
             var paneControl = new InboxCopilotPane();
             paneControl.Bind(explorer);
             var ctp = this.CustomTaskPanes.Add(paneControl, "Jameel Copilot", explorer);
-            ctp.Width = 340;
+            ctp.Width = 400;
             ctp.Visible = true;
             TraceLog.Write("Explorer CustomTaskPane.Visible = true", "ThisAddIn");
         }

@@ -18,9 +18,15 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             string folderName,
             int unreadCount,
             int totalCount,
-            CurrentSelectionResult selection)
+            CurrentSelectionResult selection,
+            OrgContextInfo org = null)
         {
             var sb = new StringBuilder();
+            var orgBlock = FormatOrgContext(org);
+            if (!string.IsNullOrEmpty(orgBlock))
+            {
+                sb.AppendLine(orgBlock);
+            }
             sb.Append("- Folder: ").Append(StructuredAnswers.OneLine(folderName ?? "Inbox"));
             sb.Append(" (").Append(unreadCount).Append(" unread, ").Append(totalCount).Append(" total)");
             sb.AppendLine();
@@ -38,6 +44,14 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     if (!string.IsNullOrEmpty(m.From))
                     {
                         sb.Append("  From: ").AppendLine(StructuredAnswers.OneLine(m.From));
+                    }
+                    if (m.To != null && m.To.Count > 0)
+                    {
+                        sb.Append("  To: ").AppendLine(StructuredAnswers.OneLine(string.Join(", ", m.To.Take(12))));
+                    }
+                    if (m.Cc != null && m.Cc.Count > 0)
+                    {
+                        sb.Append("  Cc: ").AppendLine(StructuredAnswers.OneLine(string.Join(", ", m.Cc.Take(12))));
                     }
                     sb.Append("  Received: ").AppendLine(m.ReceivedAt.ToString("o"));
                     var snippet = StructuredAnswers.OneLine(m.BodyPlaintext);
@@ -59,6 +73,44 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             }
 
             return sb.ToString();
+        }
+
+        public static string FormatOrgContext(OrgContextInfo org)
+        {
+            if (org?.User == null) return "";
+            var sb = new StringBuilder();
+            sb.Append("- User profile: ").Append(FormatPerson(org.User));
+            if (!string.IsNullOrEmpty(org.PreferredBuilding))
+            {
+                sb.Append(" | Primary building: ").Append(StructuredAnswers.OneLine(org.PreferredBuilding));
+            }
+            if (org.Manager != null && !string.IsNullOrEmpty(org.Manager.Name))
+            {
+                sb.AppendLine();
+                sb.Append("  Manager: ").Append(FormatPerson(org.Manager));
+            }
+            if (org.DirectReports != null && org.DirectReports.Count > 0)
+            {
+                sb.AppendLine();
+                sb.Append("  Direct team (").Append(org.DirectReports.Count).Append("): ")
+                  .Append(string.Join("; ", org.DirectReports.Take(20).Select(FormatPerson)));
+            }
+            if (org.Peers != null && org.Peers.Count > 0)
+            {
+                sb.AppendLine();
+                sb.Append("  Peers under same manager (").Append(org.Peers.Count).Append("): ")
+                  .Append(string.Join("; ", org.Peers.Take(15).Select(FormatPerson)));
+            }
+            return sb.ToString();
+        }
+
+        private static string FormatPerson(OrgPerson p)
+        {
+            if (p == null) return "";
+            var s = StructuredAnswers.OneLine(p.Name ?? "");
+            if (!string.IsNullOrEmpty(p.Email)) s += " <" + StructuredAnswers.OneLine(p.Email) + ">";
+            if (!string.IsNullOrEmpty(p.JobTitle)) s += " (" + StructuredAnswers.OneLine(p.JobTitle) + ")";
+            return s;
         }
     }
 }

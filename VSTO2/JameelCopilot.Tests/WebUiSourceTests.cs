@@ -164,5 +164,17 @@ namespace JameelCopilot.Tests
         {
             Assert.Contains(".messages > * { flex-shrink: 0; }", WebUi("styles.css"));
         }
+
+        // Narrow pane tables must scroll cleanly rather than splitting short words mid-letter ("Tim e").
+        [Fact]
+        public void MarkdownTables_DoNotSplitWordsMidLetter_AndLiveExplorerFallsBackSafely()
+        {
+            var css = WebUi("styles.css");
+            Assert.Contains(".msg-content table.md-table th:first-child", css);
+            Assert.Contains("overflow-wrap: normal;", css);
+
+            var surface = AddIn("Services", "Tools", "LiveOutlookSurface.cs");
+            Assert.Contains("private Outlook.Explorer GetLiveExplorer()", surface);
+        }
     }
 }

@@ -21,8 +21,20 @@ namespace JameelCopilot.Services.Tools
     /// graceful defaults (null/empty) so the tool layer can surface a
     /// structured <c>{"error":...}</c> back to the model.
     /// </summary>
-    public sealed class LiveOutlookSurface : IOutlookSurface, ICalendarSurface, IPeopleSurface, IRuleSurface
+    public sealed class LiveOutlookSurface : IOutlookSurface, ICalendarSurface, IPeopleSurface, IRuleSurface, IOrgSurface
     {
+        private static OrgContextInfo _processCachedOrg;
+        private static bool _processOrgLoaded;
+        private static List<Tuple<string, string>> _processRoomIdentities;
+        private static readonly object _cacheSync = new object();
+        private static readonly Dictionary<string, PersonMatch> _personCache =
+            new Dictionary<string, PersonMatch>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Tuple<DateTime, string>> _freeBusyCache =
+            new Dictionary<string, Tuple<DateTime, string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Tuple<DateTime, string>> _roomGridCache =
+            new Dictionary<string, Tuple<DateTime, string>>(StringComparer.OrdinalIgnoreCase);
+        private OrgContextInfo _cachedOrg;
+        private List<Tuple<string, string>> _cachedRoomIdentities;
         private readonly Outlook.Application _application;
         private readonly OutlookThreadMarshaller _marshaller;
         private readonly IdResolver _ids;
@@ -89,37 +101,40 @@ namespace JameelCopilot.Services.Tools
                 catch (COMException) { /* ignore */ }
 
                 InReplyTo reply = null;
-                try
+                if (includeFullBody)
                 {
-                    var conv = item.GetConversation();
-                    if (conv != null)
+                    try
                     {
-                        var msgs = new List<ThreadMessage>();
-                        var table = conv.GetTable();
-                        while (!table.EndOfTable)
+                        var conv = item.GetConversation();
+                        if (conv != null)
                         {
-                            var row = table.GetNextRow();
-                            var entry = row["EntryID"]?.ToString();
-                            if (string.IsNullOrEmpty(entry)) continue;
-                            var threadItem = _application.Session.GetItemFromID(entry) as Outlook.MailItem;
-                            if (threadItem == null) continue;
-                            msgs.Add(new ThreadMessage
+                            var msgs = new List<ThreadMessage>();
+                            var table = conv.GetTable();
+                            while (!table.EndOfTable)
                             {
-                                From = threadItem.SenderName ?? threadItem.SenderEmailAddress ?? "",
-                                ReceivedAt = ToOffset(threadItem.ReceivedTime),
-                                Snippet = SnippetOf(threadItem.Body),
-                            });
-                            if (msgs.Count >= 5) break;
+                                var row = table.GetNextRow();
+                                var entry = row["EntryID"]?.ToString();
+                                if (string.IsNullOrEmpty(entry)) continue;
+                                var threadItem = _application.Session.GetItemFromID(entry) as Outlook.MailItem;
+                                if (threadItem == null) continue;
+                                msgs.Add(new ThreadMessage
+                                {
+                                    From = threadItem.SenderName ?? threadItem.SenderEmailAddress ?? "",
+                                    ReceivedAt = ToOffset(threadItem.ReceivedTime),
+                                    Snippet = SnippetOf(threadItem.Body),
+                                });
+                                if (msgs.Count >= 5) break;
+                            }
+                            reply = new InReplyTo
+                            {
+                                ThreadTopic = item.ConversationTopic ?? "",
+                                LastNMessages = msgs,
+                            };
                         }
-                        reply = new InReplyTo
-                        {
-                            ThreadTopic = item.ConversationTopic ?? "",
-                            LastNMessages = msgs,
-                        };
                     }
+                    catch (COMException) { /* ignore */ }
+                    catch (Exception) { /* defensive */ }
                 }
-                catch (COMException) { /* ignore */ }
-                catch (Exception) { /* defensive */ }
 
                 Outlook.AddressEntry sender = null;
                 try { sender = _application.Session.CurrentUser?.AddressEntry; } catch (COMException) { }
@@ -227,22 +242,28 @@ namespace JameelCopilot.Services.Tools
         }
 
         /// <summary>Free/busy from the day's midnight in 30-minute steps; "me" is the user. Null for a calendar that cannot be read.</summary>
-        public IDictionary<string, string> GetFreeBusy(IEnumerable<string> people, DateTime day) =>
-            Run(() =>
+        public IDictionary<string, string> GetFreeBusy(IEnumerable<string> people, DateTime day)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var nowUtc = DateTime.UtcNow;
+            var dayBase = day.Date;
+            result["me"] = GetCachedOrFetchFreeBusy("__me__", dayBase, nowUtc, () => Run(() => FreeBusyOf(_application.Session.CurrentUser, dayBase)));
+            foreach (var person in people ?? new string[0])
             {
-                var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                result["me"] = FreeBusyOf(_application.Session.CurrentUser, day);
-                foreach (var person in people ?? new string[0])
+                var who = (person ?? "").Trim();
+                if (who.Length == 0) continue;
+                result[who] = GetCachedOrFetchFreeBusy(who, dayBase, nowUtc, () => Run(() =>
                 {
                     try
                     {
-                        var recipient = _application.Session.CreateRecipient(person);
-                        result[person] = recipient.Resolve() ? FreeBusyOf(recipient, day) : null;
+                        var recipient = _application.Session.CreateRecipient(who);
+                        return recipient.Resolve() ? FreeBusyOf(recipient, dayBase) : null;
                     }
-                    catch (COMException) { result[person] = null; }
-                }
-                return (IDictionary<string, string>)result;
-            });
+                    catch (COMException) { return null; }
+                }));
+            }
+            return result;
+        }
 
         private static string FreeBusyOf(Outlook.Recipient recipient, DateTime day)
         {
@@ -265,13 +286,27 @@ namespace JameelCopilot.Services.Tools
                 meeting.Start = proposal.Slots[slot].Item1;
                 meeting.End = proposal.Slots[slot].Item2;
                 meeting.Body = proposal.Agenda ?? "";   // a new meeting with no text: nothing of the user's is replaced
-                foreach (var person in proposal.Attendees) meeting.Recipients.Add(person);
+                foreach (var person in proposal.Attendees ?? new string[0])
+                {
+                    var reqRec = meeting.Recipients.Add(person);
+                    reqRec.Type = (int)Outlook.OlMeetingRecipientType.olRequired;
+                }
+                foreach (var optPerson in proposal.OptionalAttendees ?? new string[0])
+                {
+                    var optRec = meeting.Recipients.Add(optPerson);
+                    optRec.Type = (int)Outlook.OlMeetingRecipientType.olOptional;
+                }
                 Outlook.Recipient room = null;
-                if (!string.IsNullOrEmpty(proposal.Room))
+                var wantsTeams = string.IsNullOrEmpty(proposal.Room) || IsOnlineLocation(proposal.Room);
+                if (!wantsTeams)
                 {
                     room = meeting.Recipients.Add(proposal.Room);
                     room.Type = (int)Outlook.OlMeetingRecipientType.olResource;
                     meeting.Location = proposal.Room;
+                }
+                else
+                {
+                    meeting.Location = "Microsoft Teams Meeting";
                 }
                 try
                 {
@@ -279,7 +314,9 @@ namespace JameelCopilot.Services.Tools
                     if (room != null && room.Resolved) meeting.Location = room.Name;
                 }
                 catch (COMException) { /* Outlook shows what it could not resolve */ }
+                if (wantsTeams) TrySetOnlineMeetingProvider(meeting);
                 meeting.Display(false);
+                if (wantsTeams) ScheduleTeamsLinkGeneration(meeting);
                 return true;
             });
 
@@ -342,9 +379,21 @@ namespace JameelCopilot.Services.Tools
             // would have to redo anyway. AdvancedSearch stays the right
             // tool for narrow scopes (specific folder); for all-mail it
             // is pure waste.
+            // For auto without an explicit folder: try current_folder first via fast Table API!
+            // Only expand across all 44+ folders when current_folder finds nothing (or scope == all_mail).
+            if (string.IsNullOrEmpty(args.FolderId) && scopeMode == "auto")
+            {
+                var localHits = FallbackIterativeSearch(args, filter, "current_folder", ct);
+                if (localHits != null && localHits.Messages != null && localHits.Messages.Count > 0)
+                {
+                    return localHits;
+                }
+            }
+
             bool useAdvancedSearch =
-                !string.IsNullOrEmpty(args.FolderId) ||
-                scopeMode == "current_folder";
+                (!string.IsNullOrEmpty(args.FolderId) || scopeMode == "current_folder")
+                && string.IsNullOrEmpty(args.Query)
+                && string.IsNullOrEmpty(args.BodyContains);
 
             if (useAdvancedSearch)
             {
@@ -401,8 +450,10 @@ namespace JameelCopilot.Services.Tools
             return FallbackIterativeSearch(args, filter, scopeMode, ct);
         }
 
-        public MessageDetail ReadMessage(string messageId, bool includeFullBody) =>
-            Run(() =>
+        public MessageDetail ReadMessage(string messageId, bool includeFullBody)
+        {
+            var tempFiles = new List<Tuple<AttachmentSummary, string>>();
+            var detail = Run(() =>
             {
                 try
                 {
@@ -410,43 +461,19 @@ namespace JameelCopilot.Services.Tools
                     var item = _application.Session.GetItemFromID(entryId) as Outlook.MailItem;
                     if (item == null) return null;
 
-                    var body = item.Body ?? "";
-                    bool truncated = false;
-                    if (body.Length > MaxBodyChars)
-                    {
-                        body = body.Substring(0, MaxBodyChars);
-                        truncated = true;
-                    }
-                    if (!includeFullBody && body.Length > 1000)
-                    {
-                        body = body.Substring(0, 1000);
-                        truncated = true;
-                    }
-
-                    var attachments = new List<AttachmentSummary>();
-                    try
-                    {
-                        foreach (Outlook.Attachment att in item.Attachments)
-                        {
-                            attachments.Add(new AttachmentSummary
-                            {
-                                Filename = att.FileName,
-                                SizeBytes = att.Size,
-                            });
-                        }
-                    }
-                    catch (COMException) { }
+                    var rawBody = item.Body ?? "";
+                    var attachments = SaveSupportedAttachmentsToTemp(item, includeFullBody, tempFiles);
 
                     return new MessageDetail
                     {
                         Id = messageId,
                         Subject = item.Subject ?? "",
-                        From = item.SenderName ?? item.SenderEmailAddress ?? "",
+                        From = FormatSender(item.SenderName, item.SenderEmailAddress),
                         To = SplitAddresses(item.To),
                         Cc = SplitAddresses(item.CC),
                         ReceivedAt = ToOffset(item.ReceivedTime),
-                        BodyPlaintext = body,
-                        BodyTruncated = truncated,
+                        BodyPlaintext = rawBody,
+                        BodyTruncated = false,
                         Attachments = attachments,
                         InReplyToMessageId = null,
                         ConversationTopic = item.ConversationTopic ?? "",
@@ -455,6 +482,31 @@ namespace JameelCopilot.Services.Tools
                 catch (COMException) { return null; }
                 catch (KeyNotFoundException) { return null; }
             });
+
+            if (detail == null)
+            {
+                CleanupTempAttachments(tempFiles);
+                return null;
+            }
+
+            // Parse body signatures and extract DOCX/XLSX/PPTX/PDF text OFF the UI thread!
+            var cleanBody = ComposeBody.StripThreadSignatures(detail.BodyPlaintext);
+            bool truncated = false;
+            if (cleanBody.Length > MaxBodyChars)
+            {
+                cleanBody = cleanBody.Substring(0, MaxBodyChars);
+                truncated = true;
+            }
+            if (!includeFullBody && cleanBody.Length > 1000)
+            {
+                cleanBody = cleanBody.Substring(0, 1000);
+                truncated = true;
+            }
+            detail.BodyPlaintext = cleanBody;
+            detail.BodyTruncated = truncated;
+            ExtractAndCleanupTempAttachments(tempFiles);
+            return detail;
+        }
 
         public int CountMessages(SearchMessagesArgs args, CancellationToken ct = default(CancellationToken))
         {
@@ -558,7 +610,7 @@ namespace JameelCopilot.Services.Tools
             bool truncated = false;
             if (includeBody)
             {
-                try { body = item.Body ?? ""; } catch (COMException) { }
+                try { body = ComposeBody.StripThreadSignatures(item.Body ?? ""); } catch (COMException) { }
                 if (body.Length > MaxBodyChars)
                 {
                     body = body.Substring(0, MaxBodyChars);
@@ -1106,10 +1158,29 @@ namespace JameelCopilot.Services.Tools
                 catch (KeyNotFoundException) { }
             });
 
-        public CurrentSelectionResult GetCurrentSelection(bool includeFullBodies, int maxItems) =>
-            Run(() =>
+        private Outlook.Explorer GetLiveExplorer()
+        {
+            if (_composeInspector != null) return null;
+            if (_explorer != null)
             {
-                if (_explorer == null)
+                try
+                {
+                    var _ = _explorer.CurrentFolder;
+                    return _explorer;
+                }
+                catch (COMException) { }
+            }
+            try { return _application.ActiveExplorer(); }
+            catch (COMException) { return null; }
+        }
+
+        public CurrentSelectionResult GetCurrentSelection(bool includeFullBodies, int maxItems)
+        {
+            var tempFiles = new List<Tuple<AttachmentSummary, string>>();
+            var result = Run(() =>
+            {
+                var explorer = GetLiveExplorer();
+                if (explorer == null)
                 {
                     return new CurrentSelectionResult
                     {
@@ -1124,7 +1195,7 @@ namespace JameelCopilot.Services.Tools
                 string folderId = "";
                 try
                 {
-                    var folder = _explorer.CurrentFolder;
+                    var folder = explorer.CurrentFolder;
                     if (folder != null)
                     {
                         folderName = folder.Name ?? "";
@@ -1133,11 +1204,17 @@ namespace JameelCopilot.Services.Tools
                 }
                 catch (COMException) { }
 
-                var selection = _explorer.Selection;
+                Outlook.Selection selection = null;
                 int totalCount = 0;
-                try { totalCount = selection.Count; } catch (COMException) { }
+                try
+                {
+                    selection = explorer.Selection;
+                    if (selection != null) totalCount = selection.Count;
+                }
+                catch (COMException) { selection = null; totalCount = 0; }
 
                 var picked = new List<MessageDetail>();
+                if (selection != null && totalCount > 0)
                 try
                 {
                     int taken = 0;
@@ -1149,45 +1226,20 @@ namespace JameelCopilot.Services.Tools
                         var mi = item as Outlook.MailItem;
                         if (mi == null) continue;
 
-                        var body = mi.Body ?? "";
-                        bool truncated = false;
-                        if (!includeFullBodies && body.Length > 1000)
-                        {
-                            body = body.Substring(0, 1000);
-                            truncated = true;
-                        }
-                        else if (body.Length > MaxBodyChars)
-                        {
-                            body = body.Substring(0, MaxBodyChars);
-                            truncated = true;
-                        }
-
-                        var atts = new List<AttachmentSummary>();
-                        try
-                        {
-                            foreach (Outlook.Attachment att in mi.Attachments)
-                            {
-                                atts.Add(new AttachmentSummary
-                                {
-                                    Filename = att.FileName,
-                                    SizeBytes = att.Size,
-                                });
-                            }
-                        }
-                        catch (COMException) { }
+                        var rawBody = mi.Body ?? "";
+                        if (!includeFullBodies && rawBody.Length > 2500) rawBody = rawBody.Substring(0, 2500);
+                        var atts = SaveSupportedAttachmentsToTemp(mi, includeFullBodies, tempFiles);
 
                         picked.Add(new MessageDetail
                         {
                             Id = _ids.Shorten(mi.EntryID ?? ""),
                             Subject = mi.Subject ?? "",
-                            From = (mi.SenderName ?? "") +
-                                   (string.IsNullOrEmpty(mi.SenderEmailAddress) ? "" :
-                                    " <" + mi.SenderEmailAddress + ">"),
+                            From = FormatSender(mi.SenderName, mi.SenderEmailAddress),
                             To = SplitAddresses(mi.To),
                             Cc = SplitAddresses(mi.CC),
                             ReceivedAt = ToOffset(mi.ReceivedTime),
-                            BodyPlaintext = body,
-                            BodyTruncated = truncated,
+                            BodyPlaintext = rawBody,
+                            BodyTruncated = false,
                             Attachments = atts,
                             InReplyToMessageId = null,
                             ConversationTopic = mi.ConversationTopic ?? "",
@@ -1206,6 +1258,30 @@ namespace JameelCopilot.Services.Tools
                 };
             });
 
+            // Heavy regex signature stripping & attachment file extraction run OFF the UI thread.
+            foreach (var msg in result?.Messages ?? new MessageDetail[0])
+            {
+                var body = includeFullBodies
+                    ? ComposeBody.StripThreadSignatures(msg.BodyPlaintext ?? "")
+                    : ComposeBody.StripSignatureAndFooter(ComposeBody.FromPlainText(msg.BodyPlaintext ?? "").Own);
+                bool truncated = false;
+                if (!includeFullBodies && body.Length > 1000)
+                {
+                    body = body.Substring(0, 1000);
+                    truncated = true;
+                }
+                else if (body.Length > MaxBodyChars)
+                {
+                    body = body.Substring(0, MaxBodyChars);
+                    truncated = true;
+                }
+                msg.BodyPlaintext = body;
+                msg.BodyTruncated = truncated;
+            }
+            ExtractAndCleanupTempAttachments(tempFiles);
+            return result;
+        }
+
         // ---------- helpers ----------
 
         // -- people and rooms --------------------------------------------------
@@ -1215,68 +1291,189 @@ namespace JameelCopilot.Services.Tools
         /// match, or with several, comes back without an address: Outlook
         /// gives no list to choose from here.
         /// </summary>
-        public IReadOnlyList<PersonMatch> ResolvePeople(IReadOnlyList<string> names) =>
-            Run(() =>
+        public IReadOnlyList<PersonMatch> ResolvePeople(IReadOnlyList<string> names)
+        {
+            var result = new List<PersonMatch>();
+            foreach (var rawName in names ?? new string[0])
             {
-                var result = new List<PersonMatch>();
-                foreach (var name in names ?? new string[0])
+                var query = (rawName ?? "").Trim();
+                if (query.Length == 0)
                 {
-                    var match = new PersonMatch { Query = name };
+                    result.Add(new PersonMatch { Query = rawName });
+                    continue;
+                }
+                PersonMatch cached = null;
+                lock (_cacheSync)
+                {
+                    _personCache.TryGetValue(query, out cached);
+                }
+                if (cached != null)
+                {
+                    result.Add(new PersonMatch
+                    {
+                        Query = rawName,
+                        Name = cached.Name,
+                        Email = cached.Email,
+                        JobTitle = cached.JobTitle,
+                        Department = cached.Department,
+                    });
+                    continue;
+                }
+
+                // Resolve ONE person per UI-thread post so Outlook never stalls across a batch of names.
+                var match = Run(() =>
+                {
+                    var m = new PersonMatch { Query = rawName };
                     try
                     {
-                        var recipient = _application.Session.CreateRecipient(name);
+                        var recipient = _application.Session.CreateRecipient(query);
                         if (recipient.Resolve())
                         {
                             var entry = recipient.AddressEntry;
-                            match.Name = entry?.Name ?? recipient.Name ?? "";
-                            match.Email = TryGetSmtp(entry) ?? recipient.Address;
+                            m.Name = entry?.Name ?? recipient.Name ?? "";
+                            m.Email = TryGetSmtp(entry) ?? CleanAddress(recipient.Address);
+                            try
+                            {
+                                var exUser = entry?.GetExchangeUser();
+                                if (exUser != null)
+                                {
+                                    m.JobTitle = CleanJobTitle(exUser.JobTitle);
+                                    m.Department = (exUser.Department ?? "").Trim();
+                                }
+                            }
+                            catch (COMException) { }
                         }
                     }
                     catch (COMException) { /* not found */ }
-                    result.Add(match);
+                    return m;
+                });
+                if (!string.IsNullOrEmpty(match.Email))
+                {
+                    lock (_cacheSync)
+                    {
+                        _personCache[query] = match;
+                        if (!string.IsNullOrEmpty(match.Name)) _personCache[match.Name] = match;
+                        _personCache[match.Email] = match;
+                    }
                 }
-                return (IReadOnlyList<PersonMatch>)result;
-            });
+                result.Add(match);
+            }
+            return result;
+        }
 
         /// <summary>
         /// The rooms of the address book's room list ("All Rooms" in Exchange)
-        /// and whether each is free for the time. Null without such a list.
+        /// and whether each is free for the time. Falls back to resolving the
+        /// company's known meeting rooms through Outlook when the address list
+        /// cannot be enumerated.
         /// </summary>
-        public IReadOnlyList<RoomInfo> FindRooms(DateTime start, DateTime end, string nameContains, int max) =>
-            Run(() =>
+        public IReadOnlyList<RoomInfo> FindRooms(DateTime start, DateTime end, string nameContains, int max)
+        {
+            // Step 1: discover room names & SMTP addresses once per process.
+            if (_cachedRoomIdentities == null) _cachedRoomIdentities = _processRoomIdentities;
+            if (_cachedRoomIdentities == null)
             {
-                Outlook.AddressList rooms = null;
-                try
+                _cachedRoomIdentities = Run(() =>
                 {
-                    foreach (Outlook.AddressList list in _application.Session.AddressLists)
+                    var discovered = new List<Tuple<string, string>>();
+                    Outlook.AddressList rooms = null;
+                    try
                     {
-                        string listName;
-                        try { listName = list.Name ?? ""; } catch (COMException) { continue; }
-                        if (string.Equals(listName, "All Rooms", StringComparison.OrdinalIgnoreCase)) { rooms = list; break; }
-                        if (rooms == null && IsRoomListName(listName)) rooms = list;
+                        foreach (Outlook.AddressList list in _application.Session.AddressLists)
+                        {
+                            string listName;
+                            try { listName = list.Name ?? ""; } catch (COMException) { continue; }
+                            if (string.Equals(listName, "All Rooms", StringComparison.OrdinalIgnoreCase)) { rooms = list; break; }
+                            if (rooms == null && IsRoomListName(listName)) rooms = list;
+                        }
                     }
-                }
-                catch (COMException) { }
-                if (rooms == null) return null;
+                    catch (COMException) { }
 
-                var found = new List<RoomInfo>();
-                var looked = 0;
-                try
-                {
-                    foreach (Outlook.AddressEntry entry in rooms.AddressEntries)
+                    if (rooms != null)
                     {
-                        if (++looked > 300 || found.Count >= max) break;
-                        string name;
-                        try { name = entry.Name ?? ""; } catch (COMException) { continue; }
-                        if (!string.IsNullOrEmpty(nameContains) && name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        string grid = null;
-                        try { grid = entry.GetFreeBusy(start.Date, MeetingTimes.SlotMinutes, true); } catch (COMException) { }
-                        found.Add(new RoomInfo { Name = name, Email = TryGetSmtp(entry), Free = MeetingTimes.IsFree(grid, start.Date, start, end) });
+                        int looked = 0;
+                        try
+                        {
+                            foreach (Outlook.AddressEntry entry in rooms.AddressEntries)
+                            {
+                                if (++looked > 300) break;
+                                string name;
+                                try { name = entry.Name ?? ""; } catch (COMException) { continue; }
+                                if (IsExcludedRoom(name)) continue;
+                                discovered.Add(Tuple.Create(name, TryGetSmtp(entry) ?? ""));
+                            }
+                        }
+                        catch (COMException) { }
                     }
-                }
-                catch (COMException) { }
-                return (IReadOnlyList<RoomInfo>)found;
-            });
+
+                    if (discovered.Count == 0)
+                    {
+                        foreach (var known in KnownRoomNames)
+                        {
+                            try
+                            {
+                                var recipient = _application.Session.CreateRecipient(known);
+                                if (!recipient.Resolve()) continue;
+                                var entry = recipient.AddressEntry;
+                                var name = entry?.Name ?? recipient.Name ?? known;
+                                if (IsExcludedRoom(name)) continue;
+                                discovered.Add(Tuple.Create(name, TryGetSmtp(entry) ?? CleanAddress(recipient.Address) ?? ""));
+                            }
+                            catch (COMException) { }
+                        }
+                    }
+                    return discovered.Count > 0 || rooms != null ? discovered : null;
+                });
+                _processRoomIdentities = _cachedRoomIdentities;
+            }
+
+            if (_cachedRoomIdentities == null) return null;
+
+            // Step 2: check free/busy ONE room per UI-thread post, reusing the 30-day grid returned by Exchange!
+            var found = new List<RoomInfo>();
+            var nowUtc = DateTime.UtcNow;
+            foreach (var room in _cachedRoomIdentities)
+            {
+                if (found.Count >= max) break;
+                var roomName = room.Item1;
+                var roomEmail = room.Item2;
+                if (!string.IsNullOrEmpty(nameContains) && roomName.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                var lookupKey = !string.IsNullOrEmpty(roomEmail) ? roomEmail : roomName;
+                var grid = GetCachedOrFetchRoomGrid(lookupKey, start.Date, nowUtc, out var gridBase);
+                found.Add(new RoomInfo { Name = roomName, Email = roomEmail, Free = MeetingTimes.IsFree(grid, gridBase, start, end) });
+            }
+            return found;
+        }
+
+        private static readonly string[] KnownRoomNames =
+        {
+            "Room Crown HO1 FF Wing4",
+            "Room Supra HO1 FF Wing4",
+            "Room Lexus HO2 FF Wing4",
+            "Room Avalon HO2 FF Wing3",
+            "Room Camry HO2 FF Wing4",
+            "Room Corolla HO2 FF Wing4",
+            "Room Fortuner HO2 GF Wing2",
+            "Room Prado HO2 GF Wing2",
+            "Room Highlander HO2 GF Wing1",
+            "Room Yaris HO2 FF Wing3",
+            "Room HO2 Teleconference",
+        };
+
+        internal static bool IsExcludedRoom(string name)
+        {
+            var n = name ?? "";
+            return n.IndexOf("Test Room", StringComparison.OrdinalIgnoreCase) >= 0
+                || n.IndexOf("ACCL", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static bool IsOnlineLocation(string room)
+        {
+            var r = (room ?? "").Trim();
+            return r.IndexOf("Teams", StringComparison.OrdinalIgnoreCase) >= 0
+                || string.Equals(r, "Online", StringComparison.OrdinalIgnoreCase);
+        }
 
         // An address list of rooms under another name: "Rooms", "Meeting rooms", or the Arabic for rooms and halls.
         internal static bool IsRoomListName(string name)
@@ -1356,6 +1553,177 @@ namespace JameelCopilot.Services.Tools
                 var name = SafeFolderName(RuleFolder(folderId));
                 return name.Length > 0 ? name : null;
             });
+
+        public OrgContextInfo GetOrgContext()
+        {
+            if (_cachedOrg != null) return _cachedOrg;
+            if (_processOrgLoaded) return _cachedOrg = _processCachedOrg;
+            _cachedOrg = Run(() =>
+            {
+                try
+                {
+                    var currentEntry = _application.Session.CurrentUser?.AddressEntry;
+                    var me = currentEntry?.GetExchangeUser();
+                    if (me == null) return null;
+
+                    var mePerson = ToOrgPerson(me);
+                    Outlook.ExchangeUser mgr = null;
+                    try { mgr = me.GetExchangeUserManager(); } catch (COMException) { }
+                    var mgrPerson = mgr != null ? ToOrgPerson(mgr) : null;
+                    YieldUi(CancellationToken.None);
+
+                    var reports = new List<OrgPerson>();
+                    try
+                    {
+                        var drList = me.GetDirectReports();
+                        if (drList != null)
+                        {
+                            int idx = 0;
+                            foreach (Outlook.AddressEntry entry in drList)
+                            {
+                                if (reports.Count >= 30) break;
+                                var p = ToRealEmployee(entry);
+                                if (p != null) reports.Add(p);
+                                if ((++idx % 4) == 0) YieldUi(CancellationToken.None);
+                            }
+                        }
+                    }
+                    catch (COMException) { }
+
+                    var peers = new List<OrgPerson>();
+                    try
+                    {
+                        var peerList = mgr?.GetDirectReports();
+                        if (peerList != null)
+                        {
+                            int idx = 0;
+                            foreach (Outlook.AddressEntry entry in peerList)
+                            {
+                                if (peers.Count >= 25) break;
+                                var p = ToRealEmployee(entry);
+                                if (p != null && !string.Equals(p.Email, mePerson.Email, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    peers.Add(p);
+                                }
+                                if ((++idx % 4) == 0) YieldUi(CancellationToken.None);
+                            }
+                        }
+                    }
+                    catch (COMException) { }
+
+                    var isTechGroup = IsTechDivision(mePerson, mgrPerson, false);
+                    if (!isTechGroup)
+                    {
+                        try
+                        {
+                            var groups = me.GetMemberOfList();
+                            if (groups != null)
+                            {
+                                foreach (Outlook.AddressEntry g in groups)
+                                {
+                                    string gName = "";
+                                    try { gName = g.Name ?? ""; } catch (COMException) { }
+                                    if (string.Equals(gName, "IT", StringComparison.OrdinalIgnoreCase)
+                                        || gName.IndexOf("ALJUF IT", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        isTechGroup = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        catch (COMException) { }
+                    }
+
+                    var building = InferPreferredBuilding(mePerson, mgrPerson, isTechGroup);
+                    return new OrgContextInfo
+                    {
+                        User = mePerson,
+                        Manager = mgrPerson,
+                        DirectReports = reports,
+                        Peers = peers,
+                        PreferredBuilding = building,
+                    };
+                }
+                catch (COMException) { return null; }
+            });
+            _processCachedOrg = _cachedOrg;
+            _processOrgLoaded = true;
+            return _cachedOrg;
+        }
+
+        internal static string CleanJobTitle(string raw)
+        {
+            var t = (raw ?? "").Trim();
+            while (t.StartsWith("Alj.", StringComparison.OrdinalIgnoreCase))
+            {
+                t = t.Substring(4).TrimStart();
+            }
+            return t;
+        }
+
+        private static OrgPerson ToOrgPerson(Outlook.ExchangeUser u)
+        {
+            if (u == null) return null;
+            string name = "", email = "", title = "", dept = "";
+            try { name = u.Name ?? ""; } catch (COMException) { }
+            try { email = u.PrimarySmtpAddress ?? ""; } catch (COMException) { }
+            try { title = CleanJobTitle(u.JobTitle); } catch (COMException) { }
+            try { dept = (u.Department ?? "").Trim(); } catch (COMException) { }
+            return new OrgPerson { Name = name, Email = email, JobTitle = title, Department = dept };
+        }
+
+        private static OrgPerson ToRealEmployee(Outlook.AddressEntry entry)
+        {
+            if (entry == null) return null;
+            try
+            {
+                var u = entry.GetExchangeUser();
+                if (u == null) return null;
+                var p = ToOrgPerson(u);
+                if (string.IsNullOrEmpty(p.Email)) return null;
+                if (string.IsNullOrEmpty(p.JobTitle) && string.IsNullOrEmpty(p.Department)) return null;
+                if (p.Name.EndsWith(" admin", StringComparison.OrdinalIgnoreCase)) return null;
+                return p;
+            }
+            catch (COMException) { return null; }
+        }
+
+        private string InferPreferredBuilding(OrgPerson me, OrgPerson manager, bool isTechGroup)
+        {
+            if (IsTechDivision(me, manager, isTechGroup)) return "HO1";
+            try
+            {
+                var cal = _application.Session.GetDefaultFolder(Outlook.OlDefaultFolders.olFolderCalendar);
+                var from = DateTime.Today.AddDays(-45);
+                var items = cal.Items.Restrict("@SQL=\"urn:schemas:calendar:dtstart\" >= '" +
+                    from.ToString("M/d/yyyy h:mm:ss tt", CultureInfo.InvariantCulture) + "'");
+                int ho1 = 0, ho2 = 0, scanned = 0;
+                foreach (var item in items)
+                {
+                    if (++scanned > 40) break;
+                    if (!(item is Outlook.AppointmentItem a)) continue;
+                    var loc = a.Location ?? "";
+                    if (loc.IndexOf("HO1", StringComparison.OrdinalIgnoreCase) >= 0) ho1++;
+                    else if (loc.IndexOf("HO2", StringComparison.OrdinalIgnoreCase) >= 0) ho2++;
+                }
+                if (ho1 > ho2) return "HO1";
+                if (ho2 > ho1) return "HO2";
+            }
+            catch (COMException) { }
+            return "";
+        }
+
+        internal static bool IsTechDivision(OrgPerson me, OrgPerson manager, bool isTechGroup)
+        {
+            if (isTechGroup) return true;
+            var dept = me?.Department ?? "";
+            if (dept == "72901") return true;
+            var combined = ((me?.JobTitle ?? "") + " " + (manager?.JobTitle ?? "")).ToLowerInvariant();
+            return combined.Contains("it ") || combined.EndsWith(" it") || combined.StartsWith("it")
+                || combined.Contains("information technology") || combined.Contains("technology")
+                || combined.Contains("data ") || combined.Contains("pmo") || combined.Contains("project management");
+        }
 
         // A folder a rule may file mail in: one Jameel Copilot listed, and neither Deleted Items nor Junk.
         private Outlook.MAPIFolder RuleFolder(string folderId)
@@ -1437,6 +1805,68 @@ namespace JameelCopilot.Services.Tools
         private T Run<T>(Func<T> fn) => _marshaller.RunAsync(fn, CancellationToken.None).GetAwaiter().GetResult();
 
         private void Run(Action fn) => _marshaller.RunAsync(fn, CancellationToken.None).GetAwaiter().GetResult();
+
+        private static List<AttachmentSummary> SaveSupportedAttachmentsToTemp(
+            Outlook.MailItem item, bool saveForExtraction, List<Tuple<AttachmentSummary, string>> savedTempFiles)
+        {
+            var list = new List<AttachmentSummary>();
+            if (item == null) return list;
+            int savedCount = 0;
+            try
+            {
+                foreach (Outlook.Attachment att in item.Attachments)
+                {
+                    string fileName = "";
+                    long size = 0;
+                    try { fileName = att.FileName ?? ""; } catch (COMException) { }
+                    try { size = att.Size; } catch (COMException) { }
+                    var summary = new AttachmentSummary { Filename = fileName, SizeBytes = size };
+                    if (saveForExtraction && savedTempFiles != null && savedCount < 4
+                        && size > 0 && size <= AttachmentTextExtractor.MaxAttachmentBytes
+                        && AttachmentTextExtractor.IsSupportedExtension(fileName))
+                    {
+                        var ext = Path.GetExtension(fileName) ?? ".tmp";
+                        var tempFile = Path.Combine(Path.GetTempPath(), "jc-att-" + Guid.NewGuid().ToString("N") + ext);
+                        try
+                        {
+                            att.SaveAsFile(tempFile);
+                            savedTempFiles.Add(Tuple.Create(summary, tempFile));
+                            savedCount++;
+                        }
+                        catch
+                        {
+                            TryDeleteTempFile(tempFile);
+                        }
+                    }
+                    list.Add(summary);
+                }
+            }
+            catch (COMException) { }
+            return list;
+        }
+
+        private static void ExtractAndCleanupTempAttachments(List<Tuple<AttachmentSummary, string>> savedTempFiles)
+        {
+            if (savedTempFiles == null) return;
+            foreach (var pair in savedTempFiles)
+            {
+                try
+                {
+                    pair.Item1.ContentPlaintext = AttachmentTextExtractor.ExtractFromFile(pair.Item2, pair.Item1.Filename);
+                }
+                catch { }
+                finally
+                {
+                    TryDeleteTempFile(pair.Item2);
+                }
+            }
+        }
+
+        private static void CleanupTempAttachments(List<Tuple<AttachmentSummary, string>> savedTempFiles)
+        {
+            if (savedTempFiles == null) return;
+            foreach (var pair in savedTempFiles) TryDeleteTempFile(pair.Item2);
+        }
 
         private static void SaveNewFile(Stream source, string fullPath)
         {
@@ -1546,8 +1976,196 @@ namespace JameelCopilot.Services.Tools
         private static string TryGetSmtp(Outlook.AddressEntry entry)
         {
             if (entry == null) return null;
-            try { return entry.GetExchangeUser()?.PrimarySmtpAddress ?? entry.Address; }
+            try { return entry.GetExchangeUser()?.PrimarySmtpAddress ?? CleanAddress(entry.Address); }
             catch (COMException) { return null; }
+        }
+
+        internal static string CleanAddress(string address)
+        {
+            var a = (address ?? "").Trim();
+            if (a.Length == 0 || a.StartsWith("/O=", StringComparison.OrdinalIgnoreCase) || a.StartsWith("/o=", StringComparison.Ordinal))
+                return null;
+            return a;
+        }
+
+        internal static string FormatSender(string senderName, string senderAddress)
+        {
+            var name = (senderName ?? "").Trim();
+            var smtp = CleanAddress(senderAddress);
+            if (string.IsNullOrEmpty(smtp) || string.Equals(name, smtp, StringComparison.OrdinalIgnoreCase))
+                return name.Length > 0 ? name : (senderAddress ?? "");
+            return name.Length > 0 ? (name + " <" + smtp + ">") : smtp;
+        }
+
+        private static string GetCachedOrFetchFreeBusy(string key, DateTime dayBase, DateTime nowUtc, Func<string> fetch)
+        {
+            var cacheKey = key + "|" + dayBase.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+            lock (_cacheSync)
+            {
+                if (_freeBusyCache.TryGetValue(cacheKey, out var hit) && (nowUtc - hit.Item1).TotalMinutes < 3)
+                    return hit.Item2;
+            }
+            var grid = fetch();
+            if (grid != null)
+            {
+                lock (_cacheSync) { _freeBusyCache[cacheKey] = Tuple.Create(nowUtc, grid); }
+            }
+            return grid;
+        }
+
+        private string GetCachedOrFetchRoomGrid(string lookupKey, DateTime requestedDate, DateTime nowUtc, out DateTime gridBase)
+        {
+            lock (_cacheSync)
+            {
+                // Exchange FreeBusy returns ~30 days (1,440 30-min chars) in one call: reuse any cached grid covering requestedDate!
+                foreach (var kvp in _roomGridCache)
+                {
+                    if (!kvp.Key.StartsWith(lookupKey + "|", StringComparison.OrdinalIgnoreCase)) continue;
+                    if ((nowUtc - kvp.Value.Item1).TotalMinutes >= 5 || string.IsNullOrEmpty(kvp.Value.Item2)) continue;
+                    var datePart = kvp.Key.Substring(lookupKey.Length + 1);
+                    if (DateTime.TryParseExact(datePart, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var cachedBase))
+                    {
+                        var spanDays = (requestedDate.Date - cachedBase.Date).TotalDays;
+                        if (spanDays >= 0 && (spanDays + 1) * 48 <= kvp.Value.Item2.Length)
+                        {
+                            gridBase = cachedBase.Date;
+                            return kvp.Value.Item2;
+                        }
+                    }
+                }
+            }
+
+            var baseDay = requestedDate.Date < DateTime.Today ? DateTime.Today : DateTime.Today;
+            if ((requestedDate.Date - baseDay).TotalDays > 25) baseDay = requestedDate.Date;
+            var fetched = Run(() =>
+            {
+                try
+                {
+                    var r = _application.Session.CreateRecipient(lookupKey);
+                    return r.Resolve() ? r.FreeBusy(baseDay, MeetingTimes.SlotMinutes, true) : null;
+                }
+                catch (COMException) { return null; }
+            });
+            gridBase = baseDay;
+            if (fetched != null)
+            {
+                var storeKey = lookupKey + "|" + baseDay.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+                lock (_cacheSync) { _roomGridCache[storeKey] = Tuple.Create(nowUtc, fetched); }
+            }
+            return fetched;
+        }
+
+        private static void TrySetOnlineMeetingProvider(Outlook.AppointmentItem meeting)
+        {
+            try
+            {
+                // olOnlineMeetingProviderTeams = 5 in Outlook 16+ IDispatch (triggers Teams EMO when enabled).
+                meeting.GetType().InvokeMember(
+                    "OnlineMeetingProvider",
+                    BindingFlags.SetProperty,
+                    null,
+                    meeting,
+                    new object[] { 5 });
+            }
+            catch { /* Older Outlook builds ignore this property; UIAutomation fallback handles it below. */ }
+        }
+
+        private void ScheduleTeamsLinkGeneration(Outlook.AppointmentItem meeting)
+        {
+            var timer = new System.Windows.Forms.Timer { Interval = 480 };
+            int attempts = 0;
+            timer.Tick += (s, e) =>
+            {
+                attempts++;
+                try
+                {
+                    var body = meeting.Body ?? "";
+                    if (body.IndexOf("teams.microsoft.com", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        timer.Stop();
+                        timer.Dispose();
+                        return;
+                    }
+                    Outlook.Inspector insp = null;
+                    try { insp = meeting.GetInspector; } catch { }
+                    if (insp != null && TryInvokeTeamsRibbonButton(insp.Caption))
+                    {
+                        timer.Stop();
+                        timer.Dispose();
+                        return;
+                    }
+                }
+                catch { }
+                if (attempts >= 3)
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                }
+            };
+            timer.Start();
+        }
+
+        private static bool TryInvokeTeamsRibbonButton(string captionHint)
+        {
+            var cap = captionHint ?? "";
+            var invoked = false;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var root = System.Windows.Automation.AutomationElement.RootElement;
+                    if (root == null) return;
+                    var windows = root.FindAll(
+                        System.Windows.Automation.TreeScope.Children,
+                        new System.Windows.Automation.PropertyCondition(
+                            System.Windows.Automation.AutomationElement.ControlTypeProperty,
+                            System.Windows.Automation.ControlType.Window));
+                    int currentPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                    foreach (System.Windows.Automation.AutomationElement win in windows)
+                    {
+                        int pid = 0;
+                        try { pid = win.Current.ProcessId; } catch { continue; }
+                        if (pid != currentPid) continue;
+                        string winName = "";
+                        try { winName = win.Current.Name ?? ""; } catch { }
+                        if (!string.IsNullOrEmpty(cap) && winName.IndexOf(cap, StringComparison.OrdinalIgnoreCase) < 0
+                            && winName.IndexOf("Meeting", StringComparison.OrdinalIgnoreCase) < 0
+                            && winName.IndexOf("\u0627\u062C\u062A\u0645\u0627\u0639", StringComparison.Ordinal) < 0)
+                            continue;
+
+                        var btns = win.FindAll(
+                            System.Windows.Automation.TreeScope.Descendants,
+                            new System.Windows.Automation.PropertyCondition(
+                                System.Windows.Automation.AutomationElement.ControlTypeProperty,
+                                System.Windows.Automation.ControlType.Button));
+                        foreach (System.Windows.Automation.AutomationElement btn in btns)
+                        {
+                            string bName = "", autoId = "";
+                            try { bName = btn.Current.Name ?? ""; } catch { }
+                            try { autoId = btn.Current.AutomationId ?? ""; } catch { }
+                            var isTeamsBtn = autoId.IndexOf("Appointment_NewMeeting", StringComparison.OrdinalIgnoreCase) >= 0
+                                || autoId.IndexOf("Appointment_ScheduleMeeting", StringComparison.OrdinalIgnoreCase) >= 0
+                                || bName.Equals("Teams Meeting", StringComparison.OrdinalIgnoreCase)
+                                || bName.Equals("Schedule a meeting", StringComparison.OrdinalIgnoreCase)
+                                || (bName.IndexOf("Teams", StringComparison.OrdinalIgnoreCase) >= 0
+                                    && bName.IndexOf("Join", StringComparison.OrdinalIgnoreCase) < 0
+                                    && bName.IndexOf("Don't", StringComparison.OrdinalIgnoreCase) < 0
+                                    && bName.IndexOf("Remove", StringComparison.OrdinalIgnoreCase) < 0
+                                    && bName.IndexOf("Options", StringComparison.OrdinalIgnoreCase) < 0);
+                            if (!isTeamsBtn) continue;
+                            if (btn.TryGetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern, out var pat)
+                                && pat is System.Windows.Automation.InvokePattern inv)
+                            {
+                                inv.Invoke();
+                                invoked = true;
+                                return;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            });
+            return invoked || true; // scheduled once off-thread so UI never stalls
         }
 
         // Phase 3b primary scope resolver. Runs on the UI thread via the
@@ -1652,11 +2270,42 @@ namespace JameelCopilot.Services.Tools
             foreach (var folder in folders)
             {
                 ct.ThrowIfCancellationRequested();
+                // Skip synchronous unindexed full-body scans across large/secondary folders when
+                // query/body_contains is used: only run unindexed body GetTable on Inbox, Sent Items,
+                // or the active folder so a 44-folder body scan never stalls Exchange RPC for 15-25s!
+                bool hasBodyFilter = !string.IsNullOrEmpty(args.Query) || !string.IsNullOrEmpty(args.BodyContains);
+                string effectiveFilter = filter;
+                if (hasBodyFilter && searched >= 3 && searchAllMail && string.IsNullOrEmpty(args.FolderId))
+                {
+                    var fname = SafeFolderName(folder);
+                    bool isPrimary = string.Equals(fname, "Inbox", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(fname, "Sent Items", StringComparison.OrdinalIgnoreCase);
+                    if (!isPrimary)
+                    {
+                        // On secondary folders, search indexed Subject/From/To metadata instead of unindexed Body blobs.
+                        var metaArgs = new SearchMessagesArgs
+                        {
+                            SubjectContains = !string.IsNullOrEmpty(args.SubjectContains) ? args.SubjectContains : args.Query,
+                            From = args.From,
+                            To = args.To,
+                            DateFrom = args.DateFrom,
+                            DateTo = args.DateTo,
+                            AttachmentFilter = args.AttachmentFilter,
+                            ReadStatus = args.ReadStatus,
+                            FlagStatus = args.FlagStatus,
+                            ImportanceFilter = args.ImportanceFilter,
+                            SortOrder = args.SortOrder,
+                            MaxResults = args.MaxResults,
+                        };
+                        effectiveFilter = BuildRestrictFilter(metaArgs);
+                    }
+                }
+
                 List<MessageProjectionInput> folderInputs;
                 try
                 {
                     folderInputs = _marshaller.RunAsync(
-                        () => CollectFolderInputs(folder, args, filter, ct),
+                        () => CollectFolderInputs(folder, args, effectiveFilter, ct),
                         ct).GetAwaiter().GetResult();
                 }
                 catch (OperationCanceledException) { throw; }
@@ -1705,7 +2354,7 @@ namespace JameelCopilot.Services.Tools
             }
 
             var projected = _marshaller.RunAsync(
-                () => SearchResultProjector.Project(allInputs, args, _classifier),
+                () => SearchResultProjector.Project(allInputs, args, _classifier, () => YieldUi(ct)),
                 ct).GetAwaiter().GetResult();
             // Early-stop means we abandoned the scan before walking all folders,
             // so the page is necessarily incomplete even if the projector did
@@ -1923,7 +2572,7 @@ namespace JameelCopilot.Services.Tools
         {
             try
             {
-                var folder = _explorer?.CurrentFolder as Outlook.MAPIFolder;
+                var folder = GetLiveExplorer()?.CurrentFolder as Outlook.MAPIFolder;
                 if (folder != null) return folder;
             }
             catch (COMException) { }

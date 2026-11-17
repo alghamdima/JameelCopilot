@@ -22,7 +22,7 @@ namespace JameelCopilot.Services
 
         public const string WroteReply = "Nothing was typed, so Jameel Copilot wrote the reply. Text in [brackets] is for you to fill in.";
 
-        private const int MaxQuotedChars = 4000;
+        private const int MaxQuotedChars = 14000;
 
         /// <summary>
         /// With nothing typed in a reply, an action writes the reply itself, in

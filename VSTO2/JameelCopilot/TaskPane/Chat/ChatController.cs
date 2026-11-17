@@ -192,7 +192,9 @@ namespace JameelCopilot.TaskPane.Chat
                         try { _activeCts?.Cancel(); } catch { }
                         break;
                     case "meeting_open":
-                        OpenMeeting((string)payload?["call"], payload?["slot"]?.Type == JTokenType.Integer ? (int)payload["slot"] : -1);
+                        OpenMeeting((string)payload?["call"],
+                            payload?["slot"]?.Type == JTokenType.Integer ? (int)payload["slot"] : -1,
+                            payload?["room_index"]?.Type == JTokenType.Integer ? (int)payload["room_index"] : -1);
                         break;
                     case "open_message":
                         OpenMessage((string)payload?["id"]);
@@ -214,7 +216,7 @@ namespace JameelCopilot.TaskPane.Chat
                         InsertAnswer((string)payload?["text"]);
                         break;
                     case "copy":
-                        var clip = _store.ExportForClipboard();
+                        var clip = (string)payload?["text"] ?? _store.LatestAssistantText() ?? _store.ExportForClipboard();
                         try { Clipboard.SetText(clip ?? ""); } catch { /* clipboard occasionally throws on Outlook */ }
                         break;
                 }
@@ -286,14 +288,16 @@ namespace JameelCopilot.TaskPane.Chat
                 // with a snapshot of the existing store, let the turn evolve it,
                 // and then sync the diff back into the store at the end.
                 var initialSnapshot = _store.Snapshot();
+                var composeContext = await Task.Run(() => BuildComposeContext(), _activeCts.Token);
+                var memoryBlock = await Task.Run(() => _chats.Memory, _activeCts.Token);
                 var ctx = new ConversationContext
                 {
                     SystemInstructions = SystemPromptBuilder.Pane("compose"),
-                    Context = BuildComposeContext(),
+                    Context = composeContext,
                     History = new System.Collections.Generic.List<JObject>(initialSnapshot),
                     IncludeWriteTools = Config.WriteToolsEnabled,
                     Temperature = _prefs.Temperature,
-                    Memory = _chats.Memory,
+                    Memory = memoryBlock,
                 };
 
                 var sink = new WebViewSink(this, assistantId);
@@ -301,12 +305,16 @@ namespace JameelCopilot.TaskPane.Chat
 
                 // Sync newly-appended items (user msg + assistant + tool round-
                 // trips) back into the store so the next turn starts from the
-                // updated history.
-                for (int i = initialSnapshot.Count; i < ctx.History.Count; i++)
+                // updated history. Skip on Error so a failed turn does not
+                // pollute the conversation history.
+                if (result.StopReason != StopReason.Error)
                 {
-                    _store.Append(ctx.History[i]);
+                    for (int i = initialSnapshot.Count; i < ctx.History.Count; i++)
+                    {
+                        _store.Append(ctx.History[i]);
+                    }
+                    _ = Task.Run(() => _chats.Save());
                 }
-                _chats.Save();
 
                 var opts = new JObject(
                     new JProperty("stopped", result.StopReason == StopReason.Cancelled),
@@ -450,7 +458,7 @@ namespace JameelCopilot.TaskPane.Chat
             if (_turnInFlight || !_isReady) return;
 
             // What the user typed, apart from their signature and the message being replied to.
-            var compose = _surface?.GetCurrentComposeState(includeFullBody: true);
+            var compose = await Task.Run(() => _surface?.GetCurrentComposeState(includeFullBody: true));
 
             // An edit with text selected in the user's own part works on that text only.
             var isEdit = action != CustomApiChatService.ActionType.Draft && action != CustomApiChatService.ActionType.Custom
@@ -483,7 +491,7 @@ namespace JameelCopilot.TaskPane.Chat
                 ctx.SystemInstructions = ComposePrompt.Instructions(action, compose);
                 ctx.Context = ComposePrompt.Context(compose, includeDraft: false);
                 ctx.Temperature = _prefs.Temperature;
-                ctx.Memory = _chats.Memory;
+                ctx.Memory = await Task.Run(() => _chats.Memory, _activeCts.Token);
                 var userMessage = ComposePrompt.UserMessage(action, compose, instructions ?? "");
 
                 var result = await _chat.RunTurnAsync(ctx, userMessage, _toolHost, new WebViewSink(this, id), _activeCts.Token);
@@ -500,7 +508,7 @@ namespace JameelCopilot.TaskPane.Chat
                 // The chat keeps what was asked and what Jameel Copilot wrote, so "make it shorter" has something to work on.
                 _store.Append(HistoryMessage("user", ComposeChips.Asked(action, writesReply, instructions)));
                 _store.Append(HistoryMessage("assistant", text));
-                _chats.Save();
+                _ = Task.Run(() => _chats.Save());
                 await RunScript(ComposeChips.FinalizeScript(id,
                     selection != null ? ComposeChips.SelectionButtons() : ComposeChips.DraftButtons(hasOwnText), "not in the email yet",
                     writesReply ? ComposePrompt.WroteReply : null, false));
@@ -593,7 +601,9 @@ namespace JameelCopilot.TaskPane.Chat
             try
             {
                 var state = _surface?.GetCurrentComposeState(includeFullBody: false);
-                return ComposePrompt.Context(state, includeDraft: true);
+                var composeCtx = ComposePrompt.Context(state, includeDraft: true);
+                var orgBlock = InboxCopilot.InboxCopilotPromptBuilder.FormatOrgContext((_surface as IOrgSurface)?.GetOrgContext());
+                return string.IsNullOrEmpty(orgBlock) ? composeCtx : (orgBlock + "\n\n" + composeCtx).Trim();
             }
             catch (Exception ex)
             {
@@ -638,13 +648,28 @@ namespace JameelCopilot.TaskPane.Chat
         // JSON-encode a string for safe inlining inside an ExecuteScriptAsync
         // call. Newtonsoft handles quote / backslash / control characters.
         // A time picked on a meeting card: Outlook's meeting window, filled in, for the user to send.
-        private void OpenMeeting(string callId, int slot)
+        private void OpenMeeting(string callId, int slot, int roomIndex = -1)
         {
             var opened = false;
             try
             {
-                opened = callId != null && _meetings.TryGetValue(callId, out var proposal) && _surface != null
-                         && _surface.OpenMeetingRequest(proposal, slot);
+                if (callId != null && _meetings.TryGetValue(callId, out var proposal) && _surface != null)
+                {
+                    if (roomIndex >= 0 && proposal.RoomOptions != null && roomIndex < proposal.RoomOptions.Count)
+                    {
+                        proposal = new MeetingProposal
+                        {
+                            Subject = proposal.Subject,
+                            Attendees = proposal.Attendees,
+                            OptionalAttendees = proposal.OptionalAttendees,
+                            Slots = proposal.Slots,
+                            Agenda = proposal.Agenda,
+                            Room = proposal.RoomOptions[roomIndex].Value,
+                            RoomOptions = proposal.RoomOptions,
+                        };
+                    }
+                    opened = _surface.OpenMeetingRequest(proposal, slot);
+                }
             }
             catch (Exception ex)
             {

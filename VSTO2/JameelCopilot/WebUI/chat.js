@@ -122,6 +122,7 @@
   }
 
   var composeMode = false;
+  var hasSingleSelection = false;
   var currentAnswerId = null;
 
   // The emails the tools found or read during this turn: listed under the
@@ -441,7 +442,7 @@
     return DAYS[s.getDay()] + ' ' + s.getDate() + ' ' + MONTHS[s.getMonth()] + '  ' + hm(s) + ' - ' + hm(e);
   }
 
-  // A meeting Jameel Copilot proposes: the user picks a time and Outlook's meeting window opens.
+  // A meeting Jameel Copilot proposes: the user picks a location/room and a time, and Outlook's meeting window opens.
   function buildMeetingProposal(callId, p) {
     var node = elt('div', 'msg msg-assistant msg-draft msg-meeting');
     var head = elt('div', 'draft-head');
@@ -457,8 +458,29 @@
       who.dir = 'auto';
       body.appendChild(who);
     }
-    if (typeof p.room === 'string' && p.room) {
-      var room = elt('div', 'meeting-who', 'Room: ' + p.room);
+    if (Array.isArray(p.optional_attendees) && p.optional_attendees.length) {
+      var optWho = elt('div', 'meeting-who', 'Optional (CC): ' + p.optional_attendees.join(', '));
+      optWho.dir = 'auto';
+      body.appendChild(optWho);
+    }
+    var roomSelect = null;
+    var roomLabel = (typeof p.room_display === 'string' && p.room_display) ? p.room_display : (typeof p.room === 'string' ? p.room : '');
+    if (Array.isArray(p.room_options) && p.room_options.length) {
+      var roomRow = elt('div', 'meeting-who');
+      roomRow.appendChild(document.createTextNode('Location: '));
+      roomSelect = document.createElement('select');
+      roomSelect.className = 'meeting-room-select';
+      p.room_options.forEach(function(opt, idx) {
+        var o = document.createElement('option');
+        o.value = String(idx);
+        o.textContent = opt.label || opt.value || '';
+        if (p.room && (opt.value === p.room || opt.label === p.room)) o.selected = true;
+        roomSelect.appendChild(o);
+      });
+      roomRow.appendChild(roomSelect);
+      body.appendChild(roomRow);
+    } else if (roomLabel) {
+      var room = elt('div', 'meeting-who', 'Room: ' + roomLabel);
       room.dir = 'auto';
       body.appendChild(room);
     }
@@ -472,7 +494,9 @@
     p.slots.forEach(function(slot, i) {
       var b = button('btn btn-small' + (i === 0 ? ' btn-primary' : ''), slotLabel(slot));
       b.addEventListener('click', function() {
-        postToHost({ type: 'meeting_open', payload: { call: callId, slot: i } });
+        var payload = { call: callId, slot: i };
+        if (roomSelect) payload.room_index = parseInt(roomSelect.value, 10);
+        postToHost({ type: 'meeting_open', payload: payload });
         status.textContent = 'opened in Outlook - send it from there';
       });
       foot.appendChild(b);
@@ -833,6 +857,30 @@
         });
         foot.appendChild(entry.insertButton);
         entry.container.appendChild(foot);
+      } else if (!composeMode && hasSingleSelection && !opts.error && entry.raw && !entry.replyFoot) {
+        var rfoot = elt('div', 'msg-foot');
+        var openReply = button('btn btn-small btn-primary', 'Open reply');
+        var openReplyAll = button('btn btn-small btn-ghost', 'Reply all');
+        var copyReply = button('btn btn-small btn-ghost', 'Copy');
+        openReply.addEventListener('click', function() {
+          postToHost({ type: 'draft_action', payload: { id: id, action: 'reply' } });
+        });
+        openReplyAll.addEventListener('click', function() {
+          postToHost({ type: 'draft_action', payload: { id: id, action: 'reply_all' } });
+        });
+        copyReply.addEventListener('click', function() {
+          postToHost({ type: 'copy', payload: { text: entry.raw } });
+          copyReply.textContent = 'Copied';
+          setTimeout(function() { copyReply.textContent = 'Copy'; }, 1500);
+        });
+        rfoot.appendChild(openReply);
+        rfoot.appendChild(openReplyAll);
+        rfoot.appendChild(copyReply);
+        entry.replyFoot = rfoot;
+        entry.status = elt('span', 'draft-note', '');
+        rfoot.appendChild(entry.status);
+        entry.foot = rfoot;
+        entry.container.appendChild(rfoot);
       }
       scrollToBottom();
     },
@@ -868,6 +916,7 @@
         jc_propose_meeting:                'Preparing a meeting',
         outlook_resolve_people:            'Looking people up',
         outlook_find_rooms:                'Looking for a room',
+        outlook_get_org_context:           'Reading org profile',
         jc_propose_rule:                   'Preparing a rule',
       })[name] || 'Working on it';
 
@@ -1024,21 +1073,54 @@
     setContextStrip: function(ctx) {
       ctx = ctx || {};
       // Phase 3a: support two shapes of context.
-      //   Inbox shape:    { folder, unread_count, total_count, selection? }
+      //   Inbox shape:    { folder, unread_count, total_count, mailbox_only?, selection? }
       //   Compose shape:  { subject, recipients, thread }
       // Disambiguate by checking for ctx.folder.
       if (ctx.folder !== undefined) {
-        var unread = (ctx.unread_count != null) ? (' (' + ctx.unread_count + ' unread)') : '';
-        $ctxSubject.textContent = 'In: ' + ctx.folder + unread;
-        if (ctx.selection && ctx.selection.count > 0) {
-          if (ctx.selection.count === 1) {
-            $ctxRecipients.textContent = 'Selected: ' + (ctx.selection.subject || '') +
-              (ctx.selection.from ? (' \u2014 ' + ctx.selection.from) : '');
-          } else {
-            $ctxRecipients.textContent = 'Selected: ' + ctx.selection.count + ' messages';
-          }
+        empty($ctxSubject);
+        var folderLabel = ctx.folder || 'Mailbox';
+        $ctxSubject.appendChild(document.createTextNode('In: ' + folderLabel + ' '));
+        if (ctx.unread_count != null && ctx.unread_count > 0) {
+          var unreadBtn = button('ctx-pill ctx-unread-btn', ctx.unread_count + ' unread');
+          unreadBtn.title = 'Click to triage & mark unread emails as read / flagged';
+          unreadBtn.addEventListener('click', function() {
+            if ($input.disabled) return;
+            postToHost({ type: 'chip_action', payload: { id: 'tidy' } });
+          });
+          $ctxSubject.appendChild(unreadBtn);
+        } else if (ctx.unread_count === 0) {
+          $ctxSubject.appendChild(elt('span', 'ctx-faint', '(0 unread)'));
+        }
+
+        var mailboxOnly = !!ctx.mailbox_only;
+        var hasSel = !!(ctx.selection && ctx.selection.count > 0);
+        hasSingleSelection = !mailboxOnly && !!(ctx.selection && ctx.selection.count === 1);
+
+        if (hasSel) {
+          var toggleBtn = button('ctx-pill ctx-scope-btn', mailboxOnly ? 'Back to email' : 'All mail / + Meeting');
+          toggleBtn.title = mailboxOnly
+            ? 'Switch back to the selected email'
+            : 'Switch to whole-mailbox actions & schedule a new meeting';
+          toggleBtn.addEventListener('click', function() {
+            if ($input.disabled) return;
+            postToHost({ type: 'set_scope', payload: { scope: mailboxOnly ? 'selection' : 'mailbox' } });
+          });
+          $ctxSubject.appendChild(toggleBtn);
+        }
+
+        empty($ctxRecipients);
+        if (hasSel && !mailboxOnly) {
+          var selText = ctx.selection.count === 1
+            ? ('Selected: ' + (ctx.selection.subject || '') + (ctx.selection.from ? (' \u2014 ' + ctx.selection.from) : ''))
+            : ('Selected: ' + ctx.selection.count + ' messages');
+          $ctxRecipients.textContent = selText;
+          if ($input) $input.placeholder = 'Ask about this email, or click "All mail / + Meeting" above...';
+        } else if (hasSel && mailboxOnly) {
+          $ctxRecipients.textContent = 'Scope: All mailbox & calendar (selected email ignored)';
+          if ($input) $input.placeholder = 'Search all emails, or schedule a new meeting with anyone...';
         } else {
           $ctxRecipients.textContent = '';
+          if ($input) $input.placeholder = 'Ask about your mailbox or schedule a meeting...';
         }
         $ctxThread.textContent = '';
         return;
@@ -1106,6 +1188,7 @@
         });
         first.appendChild(more);
       }
+      $quickActions.classList.add('compact');
       $quickActions.classList.remove('expanded');
     },
 
@@ -1670,11 +1753,11 @@
     }
   });
 
-  // An empty chat shows every chip group; a running one keeps the first
-  // group and a More button, so the conversation has the room.
+  // Collapse secondary chip groups whenever a message is sent so the chat stays clean.
   if (window.MutationObserver) {
     new MutationObserver(function() {
-      $quickActions.classList.toggle('compact', $messages.childElementCount > 0);
+      $quickActions.classList.add('compact');
+      if ($messages.childElementCount > 0) $quickActions.classList.remove('expanded');
     }).observe($messages, { childList: true });
   }
 

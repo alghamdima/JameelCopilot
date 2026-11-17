@@ -69,6 +69,7 @@ namespace JameelCopilot.Services.Tools
     {
         public string Filename { get; set; }
         public long SizeBytes { get; set; }
+        public string ContentPlaintext { get; set; }
     }
 
     public sealed class FolderResult

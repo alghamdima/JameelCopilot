@@ -181,6 +181,8 @@
     <Reference Include="System.Xml.Linq" />
     <Reference Include="PresentationCore" />
     <Reference Include="System.Xaml" />
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
     <Reference Include="WindowsBase" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="Microsoft.CSharp" />
@@ -352,6 +354,7 @@
     <Compile Include="Services\OutlookToolHost.cs" />
     <Compile Include="Services\ToolDispatcher.cs" />
     <Compile Include="Services\Tools\ComposeDocument.cs" />
+    <Compile Include="Services\Tools\AttachmentTextExtractor.cs" />
     <Compile Include="Services\Tools\AggregateMessagesArgs.cs" />
     <Compile Include="Services\Tools\AggregateMessagesArgsParser.cs" />
     <Compile Include="Services\Tools\AggregationBucket.cs" />

@@ -163,6 +163,111 @@ namespace JameelCopilot.Tests.Services.Tools
         }
 
         [Fact]
+        public async Task ProposeMeeting_BuildsRoomDisplay_AndDropdownOptions()
+        {
+            var surface = new RoomAwareCalendar
+            {
+                PreferredBuilding = "HO1",
+                Rooms = new[]
+                {
+                    new RoomInfo { Name = "Room Lexus HO2 FF Wing4", Email = "RoomHO2Lexus@example.com", Free = true },
+                    new RoomInfo { Name = "Room Crown HO1 FF Wing4", Email = "RoomHO1Crown@example.com", Free = true },
+                }
+            };
+            var args = "{\"subject\":\"Daily Loan Sync\",\"attendees\":[\"sara@example.com\"],\"room\":\"RoomHO1Crown@example.com\"," +
+                       "\"slots\":[{\"start\":\"2026-11-18T10:00\",\"end\":\"2026-11-18T10:30\"}]}";
+
+            var result = await new ProposeMeetingTool().ExecuteAsync(args, surface, CancellationToken.None);
+            var json = JObject.Parse(result);
+
+            Assert.Equal("Room Crown HO1 FF Wing4", (string)json["room_display"]);
+            var opts = (JArray)json["room_options"];
+            Assert.NotNull(opts);
+            Assert.Equal("Room Crown HO1 FF Wing4", (string)opts[0]["label"]); // HO1 preferred first
+            Assert.Contains(opts, o => (string)o["value"] == "Microsoft Teams Meeting");
+
+            var kept = MeetingProposal.FromResult(result);
+            Assert.Equal("RoomHO1Crown@example.com", kept.Room);
+            Assert.Equal("Room Crown HO1 FF Wing4", kept.RoomOptions[0].Label);
+            Assert.True(kept.RoomOptions.Count >= 3);
+        }
+
+        [Fact]
+        public async Task FindTimes_DefaultsToOneHour_ExcludesBreak_AndSupportsOptionalAttendees()
+        {
+            // Busy everywhere except 11:30-14:30 on Monday 2030-01-07 (day 0 relative to date_from).
+            // With 1h default and 12:30-13:30 break excluded, 12:00-13:00, 12:30-13:30, and 13:00-14:00 MUST NOT appear;
+            // only 11:30-12:30 and 13:30-14:30 are valid!
+            var busyMorning = (Slot(0, 0), Slot(0, 11, 30));
+            var busyAfternoon = (Slot(0, 14, 30), Slot(0, 24));
+            var me = Grid(busyMorning, busyAfternoon);
+            var req = Grid(busyMorning, busyAfternoon);
+            var optBusyAt1130 = Grid(busyMorning, (Slot(0, 11, 30), Slot(0, 12, 30)), busyAfternoon);
+
+            var calendar = new Calendar
+            {
+                FreeBusy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["me"] = me,
+                    ["req@example.com"] = req,
+                    ["cc@example.com"] = optBusyAt1130,
+                }
+            };
+
+            // 1) Without checking optional availability: both 11:30-12:30 and 13:30-14:30 are returned (60 min, break skipped).
+            var resSkipOpt = JObject.Parse(await new FindMeetingTimesTool().ExecuteAsync(
+                "{\"attendees\":[\"req@example.com\"],\"optional_attendees\":[\"cc@example.com\"],\"check_optional_availability\":false,\"date_from\":\"2030-01-07T09:00\",\"date_to\":\"2030-01-07T17:00\"}",
+                calendar, CancellationToken.None));
+            Assert.Equal(60, (int)resSkipOpt["duration_minutes"]);
+            Assert.Equal("12:30-13:30", (string)resSkipOpt["excluded_break"]);
+            var skipSlots = resSkipOpt["slots"].Select(s => (string)s["start"] + "->" + (string)s["end"]).ToArray();
+            Assert.Equal(new[] { "2030-01-07T11:30->2030-01-07T12:30", "2030-01-07T13:30->2030-01-07T14:30" }, skipSlots);
+
+            // 2) With check_optional_availability=true: 11:30-12:30 is busy for cc@example.com, so only 13:30-14:30 is returned!
+            var resCheckOpt = JObject.Parse(await new FindMeetingTimesTool().ExecuteAsync(
+                "{\"attendees\":[\"req@example.com\"],\"optional_attendees\":[\"cc@example.com\"],\"check_optional_availability\":true,\"date_from\":\"2030-01-07T09:00\",\"date_to\":\"2030-01-07T17:00\"}",
+                calendar, CancellationToken.None));
+            var checkSlots = resCheckOpt["slots"].Select(s => (string)s["start"] + "->" + (string)s["end"]).ToArray();
+            Assert.Equal(new[] { "2030-01-07T13:30->2030-01-07T14:30" }, checkSlots);
+        }
+
+        [Fact]
+        public async Task ProposeMeeting_KeepsOptionalAttendees_SeparateFromRequired()
+        {
+            var args = "{\"subject\":\"Project Sync\",\"attendees\":[\"req@example.com\"],\"optional_attendees\":[\"cc1@example.com\",\"req@example.com\",\"cc2@example.com\"]," +
+                       "\"slots\":[{\"start\":\"2026-11-18T10:00\",\"end\":\"2026-11-18T11:00\"}]}";
+            var result = await new ProposeMeetingTool().ExecuteAsync(args, null, CancellationToken.None);
+            var kept = MeetingProposal.FromResult(result);
+
+            Assert.Equal(new[] { "req@example.com" }, kept.Attendees);
+            Assert.Equal(new[] { "cc1@example.com", "cc2@example.com" }, kept.OptionalAttendees);
+        }
+
+        private sealed class RoomAwareCalendar : IOutlookSurface, IPeopleSurface, IOrgSurface
+        {
+            public string PreferredBuilding;
+            public IReadOnlyList<RoomInfo> Rooms = new RoomInfo[0];
+            public IReadOnlyList<PersonMatch> ResolvePeople(IReadOnlyList<string> names) => new PersonMatch[0];
+            public IReadOnlyList<RoomInfo> FindRooms(DateTime start, DateTime end, string nameContains, int max) => Rooms;
+            public OrgContextInfo GetOrgContext() => new OrgContextInfo { PreferredBuilding = PreferredBuilding };
+            public ComposeStateResult GetCurrentComposeState(bool includeFullBody) => null;
+            public IReadOnlyList<FolderResult> ListFolders() => null;
+            public SearchResult SearchMessages(SearchMessagesArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public MessageDetail ReadMessage(string messageId, bool includeFullBody) => null;
+            public IReadOnlyList<MessageDetail> ReadMessages(string[] ids, bool includeBody, int maxItems, CancellationToken ct = default(CancellationToken)) => null;
+            public int CountMessages(SearchMessagesArgs args, CancellationToken ct = default(CancellationToken)) => 0;
+            public IReadOnlyList<AggregationBucket> AggregateMessages(AggregateMessagesArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public IReadOnlyList<ThreadSummary> ListRecentThreadsWith(string recipientEmail, int maxThreads) => null;
+            public FileSavedResult ExportExcel(ExportExcelArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public FileSavedResult ExportPdf(ExportPdfArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public CreatedDraft CreateDraft(CreateDraftArgs args) => null;
+            public CurrentSelectionResult GetCurrentSelection(bool includeFullBodies, int maxItems) => null;
+            public void MarkAsRead(string messageId, bool read) { }
+            public void FlagMessage(string messageId, string flag) { }
+            public void SetCategory(string messageId, string category) { }
+        }
+
+        [Fact]
         public void TheMeetingWindow_OpensOnlyFromTheHostsProposal_AndSendsNothing()
         {
             var surface = File.ReadAllText(RepoFiles.Find("VSTO2", "JameelCopilot", "Services", "Tools", "LiveOutlookSurface.cs"));

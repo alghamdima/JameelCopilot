@@ -254,10 +254,10 @@ namespace JameelCopilot.Tests.Services
         [Fact]
         public void Context_LongQuotedMessage_IsCut()
         {
-            var context = ComposePrompt.Context(Reply("", quoted: new string('x', 5000)), includeDraft: false);
+            var context = ComposePrompt.Context(Reply("", quoted: new string('x', 15000)), includeDraft: false);
 
-            Assert.EndsWith("\n> " + new string('x', 4000) + "\n> [... the rest is cut ...]", context);
-            Assert.DoesNotContain(new string('x', 4001), context);
+            Assert.EndsWith("\n> " + new string('x', 14000) + "\n> [... the rest is cut ...]", context);
+            Assert.DoesNotContain(new string('x', 14001), context);
         }
 
         [Fact]

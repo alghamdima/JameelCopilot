@@ -38,6 +38,7 @@ namespace JameelCopilot.Services
                 new ProposeMeetingTool(),                // shows times; the user opens the meeting request
                 new ResolvePeopleTool(),                 // names to the address book's people
                 new FindRoomsTool(),                     // meeting rooms and whether they are free
+                new GetOrgContextTool(),                 // user's org profile, team, manager, peers and building
                 new ProposeRuleTool(),                   // shows a rule; the user creates it
             };
             if (includeWriteTools)

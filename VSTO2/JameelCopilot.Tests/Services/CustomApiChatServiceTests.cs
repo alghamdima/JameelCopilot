@@ -192,7 +192,7 @@ namespace JameelCopilot.Tests.Services
 
             var names = Body()["tools"].Select(t => (string)t["function"]["name"]).ToList();
             Assert.Empty(names.Intersect(Config.AllWriteTools));
-            Assert.Equal(19, names.Count);   // 16 that read the mailbox, the calendar and the address book, and three that only propose (a note, a meeting, a rule)
+            Assert.Equal(20, names.Count);   // 17 that read the mailbox, the calendar, the address book and org hierarchy, and three that only propose (a note, a meeting, a rule)
         }
 
         [Fact]

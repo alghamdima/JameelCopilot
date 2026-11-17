@@ -29,8 +29,8 @@ namespace JameelCopilot.Services.Tools
                     TraceLog.Write("Read: own text ends at " + ownEnd + ", quoted message starts at " + quotedStart +
                                    " of " + doc.Content.End, "ComposeDocument");
                     return new ComposeBody(
-                        ComposeBody.FromWord(doc.Range(0, ownEnd).Text),
-                        ComposeBody.FromWord(doc.Range(quotedStart, doc.Content.End).Text));
+                        ComposeBody.StripSignatureAndFooter(ComposeBody.FromWord(doc.Range(0, ownEnd).Text)),
+                        ComposeBody.StripThreadSignatures(ComposeBody.FromWord(doc.Range(quotedStart, doc.Content.End).Text)));
                 }
             }
             catch (Exception ex) when (ex is COMException || ex is InvalidCastException)
@@ -115,7 +115,41 @@ namespace JameelCopilot.Services.Tools
                 int at = ComposeBody.QuotedIndex(text.Replace('\r', '\n'));
                 if (at >= 0 && (doc.Range(0, at).Text ?? "") == text.Substring(0, at)) quotedStart = at;
             }
-            ownEnd = Math.Min(StartOf(doc, SignatureMark, end), quotedStart);
+            int sigStart = StartOf(doc, SignatureMark, end);
+            ownEnd = Math.Min(sigStart, quotedStart);
+            if (sigStart == end && ownEnd > 0)
+            {
+                // Manual signature without _MailAutoSig bookmark: find where the clean text ends
+                // so ReplaceOwnText preserves the manual signature block below it.
+                try
+                {
+                    string rawOwn = doc.Range(0, ownEnd).Text ?? "";
+                    string cleanOwn = ComposeBody.StripSignatureAndFooter(ComposeBody.FromWord(rawOwn));
+                    if (cleanOwn.Length == 0 && rawOwn.Trim().Length > 0)
+                    {
+                        // Nothing typed yet, only a manual signature sits above the quoted message.
+                        ownEnd = 0;
+                    }
+                    else if (cleanOwn.Length > 0)
+                    {
+                        string[] cleanLines = cleanOwn.Split('\n');
+                        string lastLine = cleanLines[cleanLines.Length - 1].Trim();
+                        if (lastLine.Length > 0)
+                        {
+                            int idx = rawOwn.IndexOf(lastLine, StringComparison.Ordinal);
+                            if (idx >= 0)
+                            {
+                                int candidateEnd = idx + lastLine.Length;
+                                if (candidateEnd < ownEnd && (doc.Range(0, candidateEnd).Text ?? "") == rawOwn.Substring(0, candidateEnd))
+                                {
+                                    ownEnd = candidateEnd;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
         }
 
         private static int StartOf(Word.Document doc, string mark, int none)

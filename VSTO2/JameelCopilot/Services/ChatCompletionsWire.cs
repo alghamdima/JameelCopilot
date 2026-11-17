@@ -28,6 +28,9 @@ namespace JameelCopilot.Services
                 messages.Add(Message("system", systemInstructions));
             }
 
+            int lastUserIndex = items.FindLastIndex(i =>
+                (string)i["type"] == "message" && ((string)i["role"] ?? "user") == "user");
+
             JObject assistant = null;                 // the text message the next round's calls may join
             var at = 0;
             while (at < items.Count)
@@ -43,9 +46,10 @@ namespace JameelCopilot.Services
                 }
                 else if (type == "function_call")
                 {
+                    var fromOlderTurn = lastUserIndex >= 0 && at < lastUserIndex;
                     var calls = TakeRun(items, ref at, "function_call");
                     var outputs = TakeRun(items, ref at, "function_call_output");
-                    AddRound(messages, assistant, calls, outputs);
+                    AddRound(messages, assistant, calls, outputs, fromOlderTurn);
                     assistant = null;
                 }
                 else
@@ -53,7 +57,30 @@ namespace JameelCopilot.Services
                     at++;                             // a result with no call before it
                 }
             }
+            EnforcePayloadBudget(messages);
             return messages;
+        }
+
+        private const int MaxPayloadChars = 90000;
+
+        private static void EnforcePayloadBudget(JArray messages)
+        {
+            int total = messages.Sum(m => ((string)m["content"] ?? "").Length);
+            if (total <= MaxPayloadChars) return;
+
+            // Trim oldest tool messages (except the very last 2 messages) first so recent tool results stay intact.
+            for (int i = 1; i < messages.Count - 2 && total > MaxPayloadChars; i++)
+            {
+                var msg = messages[i] as JObject;
+                if (msg == null || (string)msg["role"] != "tool") continue;
+                var content = (string)msg["content"] ?? "";
+                if (content.Length > 800)
+                {
+                    var shortened = content.Substring(0, 800) + "...[trimmed to fit context window]";
+                    total -= (content.Length - shortened.Length);
+                    msg["content"] = shortened;
+                }
+            }
         }
 
         private static List<JObject> TakeRun(List<JObject> items, ref int at, string type)
@@ -70,7 +97,9 @@ namespace JameelCopilot.Services
         // and no result yet, so a repeated id still pairs in order. An API
         // rejects a call without a result (a turn stopped mid-run): such a
         // call is not sent back.
-        private static void AddRound(JArray messages, JObject assistant, List<JObject> calls, List<JObject> outputs)
+        private const int MaxOlderToolOutputChars = 600;
+
+        private static void AddRound(JArray messages, JObject assistant, List<JObject> calls, List<JObject> outputs, bool fromOlderTurn = false)
         {
             var resultOf = new string[calls.Count];
             foreach (var output in outputs)
@@ -97,16 +126,26 @@ namespace JameelCopilot.Services
             {
                 if (resultOf[k] == null) continue;
                 var id = (string)calls[k]["call_id"] ?? "";
+                var args = (string)calls[k]["arguments"] ?? "{}";
+                if (fromOlderTurn && args.Length > MaxOlderToolOutputChars)
+                {
+                    args = "{\"_trimmed\":true}";
+                }
+                var content = resultOf[k];
+                if (fromOlderTurn && content.Length > MaxOlderToolOutputChars)
+                {
+                    content = content.Substring(0, MaxOlderToolOutputChars) + "...[older tool output trimmed]";
+                }
                 toolCalls.Add(new JObject(
                     new JProperty("id", id),
                     new JProperty("type", "function"),
                     new JProperty("function", new JObject(
                         new JProperty("name", (string)calls[k]["name"] ?? ""),
-                        new JProperty("arguments", (string)calls[k]["arguments"] ?? "{}")))));
+                        new JProperty("arguments", args)))));
                 results.Add(new JObject(
                     new JProperty("role", "tool"),
                     new JProperty("tool_call_id", id),
-                    new JProperty("content", resultOf[k])));
+                    new JProperty("content", content)));
             }
             messages.Add(results);
         }

@@ -175,6 +175,84 @@ namespace JameelCopilot.Tests.Services.Tools
             Assert.Equal(expected, LiveOutlookSurface.IsRoomListName(listName));
         }
 
+        [Theory]
+        [InlineData("Room Land Cruiser ACCL", true)]
+        [InlineData("Room Veloz ACCL", true)]
+        [InlineData("Test Room Mailbox", true)]
+        [InlineData("Room Crown HO1 FF Wing4", false)]
+        [InlineData("Room Lexus HO2 FF Wing4", false)]
+        public void ExcludedRooms_AreFilteredOut(string roomName, bool expected)
+        {
+            Assert.Equal(expected, LiveOutlookSurface.IsExcludedRoom(roomName));
+        }
+
+        [Fact]
+        public void FormatSender_HidesRawExchangeX500Paths()
+        {
+            Assert.Equal("Nabeel Example", LiveOutlookSurface.FormatSender("Nabeel Example", "/O=EXCHANGELABS/OU=EXCHANGE/CN=RECIPIENTS/CN=123"));
+            Assert.Equal("Sara Example <sara@example.com>", LiveOutlookSurface.FormatSender("Sara Example", "sara@example.com"));
+            Assert.Equal("sara@example.com", LiveOutlookSurface.FormatSender("sara@example.com", "sara@example.com"));
+        }
+
+        [Fact]
+        public async Task FindRooms_RanksPreferredBuildingFirst_AmongFreeRooms()
+        {
+            var book = new OrgBook
+            {
+                Org = new OrgContextInfo
+                {
+                    User = new OrgPerson { Name = "Omar Example", Email = "omar@example.com", JobTitle = "Data Science Manager", Department = "72901" },
+                    Manager = new OrgPerson { Name = "Ali Example", Email = "ali@example.com", JobTitle = "IT Director", Department = "72901" },
+                    DirectReports = new[] { new OrgPerson { Name = "Sara Example", Email = "sara@example.com", JobTitle = "Data Engineer" } },
+                    Peers = new[] { new OrgPerson { Name = "Murad Example", Email = "murad@example.com", JobTitle = "IT Ops Manager" } },
+                    PreferredBuilding = "HO1",
+                },
+                Rooms = new[]
+                {
+                    new RoomInfo { Name = "Room Lexus HO2 FF Wing4", Email = "lexus@example.com", Free = true },
+                    new RoomInfo { Name = "Room Supra HO1 FF Wing4", Email = "supra@example.com", Free = false },
+                    new RoomInfo { Name = "Room Crown HO1 FF Wing4", Email = "crown@example.com", Free = true },
+                },
+            };
+
+            var roomsJson = await Run(new FindRoomsTool(), "{\"start\":\"2026-11-15T10:00\",\"end\":\"2026-11-15T10:30\"}", book);
+            Assert.Equal(new[] { "Room Crown HO1 FF Wing4", "Room Lexus HO2 FF Wing4", "Room Supra HO1 FF Wing4" },
+                roomsJson["rooms"].Select(r => (string)r["name"]));
+            Assert.Equal("HO1", (string)roomsJson["preferred_building"]);
+
+            var orgJson = await Run(new GetOrgContextTool(), "{}", book);
+            Assert.Equal("Data Science Manager", (string)orgJson["user"]["job_title"]);
+            Assert.Equal("Ali Example", (string)orgJson["manager"]["name"]);
+            Assert.Equal("Sara Example", (string)orgJson["direct_reports"][0]["name"]);
+            Assert.Equal("HO1", (string)orgJson["preferred_building"]);
+            Assert.Equal("Data Science Manager", LiveOutlookSurface.CleanJobTitle("Alj.Alj.Data Science Manager"));
+            Assert.True(LiveOutlookSurface.IsTechDivision(book.Org.User, book.Org.Manager, false));
+        }
+
+        private sealed class OrgBook : IPeopleSurface, IOrgSurface, IOutlookSurface
+        {
+            public OrgContextInfo Org;
+            public IReadOnlyList<RoomInfo> Rooms;
+            public OrgContextInfo GetOrgContext() => Org;
+            public IReadOnlyList<PersonMatch> ResolvePeople(IReadOnlyList<string> names) => new PersonMatch[0];
+            public IReadOnlyList<RoomInfo> FindRooms(DateTime start, DateTime end, string nameContains, int max) => Rooms;
+            public ComposeStateResult GetCurrentComposeState(bool includeFullBody) => null;
+            public IReadOnlyList<FolderResult> ListFolders() => null;
+            public SearchResult SearchMessages(SearchMessagesArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public MessageDetail ReadMessage(string messageId, bool includeFullBody) => null;
+            public IReadOnlyList<MessageDetail> ReadMessages(string[] ids, bool includeBody, int maxItems, CancellationToken ct = default(CancellationToken)) => null;
+            public int CountMessages(SearchMessagesArgs args, CancellationToken ct = default(CancellationToken)) => 0;
+            public IReadOnlyList<AggregationBucket> AggregateMessages(AggregateMessagesArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public IReadOnlyList<ThreadSummary> ListRecentThreadsWith(string recipientEmail, int maxThreads) => null;
+            public FileSavedResult ExportExcel(ExportExcelArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public FileSavedResult ExportPdf(ExportPdfArgs args, CancellationToken ct = default(CancellationToken)) => null;
+            public CreatedDraft CreateDraft(CreateDraftArgs args) => null;
+            public CurrentSelectionResult GetCurrentSelection(bool includeFullBodies, int maxItems) => null;
+            public void MarkAsRead(string messageId, bool read) { }
+            public void FlagMessage(string messageId, string flag) { }
+            public void SetCategory(string messageId, string category) { }
+        }
+
         [Fact]
         public async Task ProposeMeeting_CarriesTheRoom()
         {

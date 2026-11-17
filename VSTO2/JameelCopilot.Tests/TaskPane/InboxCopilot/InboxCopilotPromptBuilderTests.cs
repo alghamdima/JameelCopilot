@@ -37,6 +37,8 @@ namespace JameelCopilot.Tests.TaskPane.InboxCopilot
                         Id = "m1",
                         Subject = "Re: Q4 plan",
                         From = "Jane Doe <jane@acme.com>",
+                        To = new[] { "Omar <omar@acme.com>" },
+                        Cc = new[] { "Audit <audit@acme.com>" },
                         ReceivedAt = new DateTimeOffset(2026, 5, 17, 9, 14, 0, TimeSpan.Zero),
                         BodyPlaintext = "Hi team - thoughts on regional split. ",
                     }
@@ -47,6 +49,8 @@ namespace JameelCopilot.Tests.TaskPane.InboxCopilot
             Assert.Contains("Selected:", prompt);
             Assert.Contains("Re: Q4 plan", prompt);
             Assert.Contains("Jane Doe", prompt);
+            Assert.Contains("To: Omar <omar@acme.com>", prompt);
+            Assert.Contains("Cc: Audit <audit@acme.com>", prompt);
         }
 
         [Fact]

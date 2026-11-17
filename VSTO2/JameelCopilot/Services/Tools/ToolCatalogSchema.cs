@@ -101,7 +101,7 @@ namespace JameelCopilot.Services.Tools
                         new JProperty("additionalProperties", false))),
 
                 BuildToolEntry("outlook_read_message",
-                    "Fetch one message by id. Body always plaintext; truncated at 32 KB.",
+                    "Fetch one message by id. Body always plaintext; truncated at 32 KB. Also extracts content_plaintext from supported attachments (.docx, .xlsx, .pptx, .pdf, .txt, .csv) when include_full_body is true.",
                     new JObject(
                         new JProperty("type", "object"),
                         new JProperty("required", new JArray("message_id")),
@@ -334,14 +334,19 @@ namespace JameelCopilot.Services.Tools
                         new JProperty("additionalProperties", false))),
 
                 BuildToolEntry(FindMeetingTimesTool.ToolName,
-                    "Find times when the user and the attendees (their email addresses, from outlook_resolve_people) are all free, from their Outlook free/busy. "
-                    + "Local time. Defaults: the next 7 days, 08:00 to 17:00, working days sun-thu (or 'mon-fri'), 30 minutes. "
+                    "Find times when the user and the required attendees (their email addresses, from outlook_resolve_people; omit the user's own email) are all free, from their Outlook free/busy. "
+                    + "Local time (KSA). Defaults: duration_minutes=60 (1 hour), the next 7 days, 09:00 to 17:00, strictly excluding the daily break 12:30-13:30, working days sun-thu (or 'mon-fri'). "
+                    + "Put CC recipients in optional_attendees and set check_optional_availability=true only when the user wants to check CC calendars too (false skips CC free/busy). "
+                    + "Before calling this tool, if the user's scheduling prompt is missing key details (attendees when no email is selected, whether to check availability of CC/optional people when the email has CC recipients, or location/Teams preference), ask one short clarifying question first. "
+                    + "Each returned slot already includes free_rooms ranked by preferred_building (and busy_attendees if only partial overlap exists). "
                     + "calendars_not_read lists people whose calendar could not be read: tell the user.",
                     new JObject(
                         new JProperty("type", "object"),
                         new JProperty("properties", new JObject(
-                            new JProperty("attendees", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(new JProperty("type","string"))))),
-                            new JProperty("duration_minutes", new JObject(new JProperty("type","integer"), new JProperty("minimum",15), new JProperty("maximum",480))),
+                            new JProperty("attendees", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(new JProperty("type","string"))), new JProperty("description","Required attendees' email addresses (sender + To recipients, excluding the user)."))),
+                            new JProperty("optional_attendees", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(new JProperty("type","string"))), new JProperty("description","Optional attendees' email addresses (CC recipients, excluding the user)."))),
+                            new JProperty("check_optional_availability", new JObject(new JProperty("type","boolean"), new JProperty("description","If true, also checks free/busy for optional_attendees; default false."))),
+                            new JProperty("duration_minutes", new JObject(new JProperty("type","integer"), new JProperty("minimum",15), new JProperty("maximum",480), new JProperty("description","Meeting duration in minutes; default 60 (1 hour)."))),
                             new JProperty("date_from", new JObject(new JProperty("type","string"))),
                             new JProperty("date_to", new JObject(new JProperty("type","string"))),
                             new JProperty("day_start", new JObject(new JProperty("type","string"))),
@@ -351,15 +356,16 @@ namespace JameelCopilot.Services.Tools
 
                 // Not a write: the times are only shown; the user opens the meeting request.
                 BuildToolEntry(ProposeMeetingTool.ToolName,
-                    "Propose a meeting to the user: a subject, the attendees (email addresses from outlook_resolve_people), one to three times found with outlook_find_meeting_times, a short agenda, "
-                    + "and a room's email from outlook_find_rooms when the user wants one. "
-                    + "Nothing is sent or created by this call: the user picks a time and Outlook's meeting window opens for them to send.",
+                    "Propose a meeting to the user: a subject, required attendees (email addresses from outlook_resolve_people), optional_attendees (CC recipients, added as Optional in Outlook), one to three times found with outlook_find_meeting_times, a structured agenda, "
+                    + "and a free room's email from free_rooms/outlook_find_rooms (or 'Microsoft Teams Meeting' when online or no room is free) as room. "
+                    + "Nothing is sent or created by this call: the user picks a time (and can switch the room/Teams in the card) and Outlook's meeting window opens for them to send.",
                     new JObject(
                         new JProperty("type", "object"),
                         new JProperty("required", new JArray("subject", "slots")),
                         new JProperty("properties", new JObject(
                             new JProperty("subject", new JObject(new JProperty("type","string"))),
                             new JProperty("attendees", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(new JProperty("type","string"))))),
+                            new JProperty("optional_attendees", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(new JProperty("type","string"))), new JProperty("description","Optional attendees (such as CC recipients); Outlook adds them to the Optional line."))),
                             new JProperty("slots", new JObject(new JProperty("type","array"), new JProperty("items", new JObject(
                                 new JProperty("type","object"),
                                 new JProperty("properties", new JObject(
@@ -383,6 +389,7 @@ namespace JameelCopilot.Services.Tools
 
                 BuildToolEntry(FindRoomsTool.ToolName,
                     "List the company's meeting rooms and whether each is free from start to end (local time, 'yyyy-MM-ddTHH:mm'). "
+                    + "Free rooms in the user's preferred_building (e.g. HO1 for Technology/IT/Data/PMO) come first, with HO2 rooms available as alternatives when HO1 rooms are busy. "
                     + "name_contains narrows the list (a building, a floor, a room name). Give a free room's email to jc_propose_meeting as room.",
                     new JObject(
                         new JProperty("type", "object"),
@@ -391,6 +398,14 @@ namespace JameelCopilot.Services.Tools
                             new JProperty("start", new JObject(new JProperty("type","string"))),
                             new JProperty("end", new JObject(new JProperty("type","string"))),
                             new JProperty("name_contains", new JObject(new JProperty("type","string"))))),
+                        new JProperty("additionalProperties", false))),
+
+                BuildToolEntry(GetOrgContextTool.ToolName,
+                    "Read the current user's Exchange organizational profile: their job title, department, direct manager, direct_reports (their team), peers under the same manager, and preferred_building (HO1 or HO2). "
+                    + "Use when the user refers to 'my team', 'my manager', 'my peers', or asks about org structure or preferred meeting rooms.",
+                    new JObject(
+                        new JProperty("type", "object"),
+                        new JProperty("properties", new JObject()),
                         new JProperty("additionalProperties", false))),
 
                 // Not a write: the rule is only shown; the user creates it or not.

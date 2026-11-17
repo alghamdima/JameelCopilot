@@ -56,8 +56,8 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     new QuickActionChip { Label = "Draft a reply", Mode = "action", Id = ReplyChipId, Primary = true },
                     Send("Summarize", "Summarize the selected message and the rest of its conversation thread."),
                     new QuickActionChip { Label = "Action items", Mode = "action", Id = TodosChipId },
-                    Send("Translate", "Translate the selected message for me: into English if it is written in Arabic, into Arabic if it is written in any other language. Give the translation only, and keep names, numbers and dates as they are."),
-                    Send("Schedule a meeting", "Propose a meeting about the selected email with its sender and the people on it: find times in the next 5 working days when we are all free and show them to me with a short agenda.")));
+                    Send("Translate", "Translate the main message body of the selected email (ignore classification footers and signatures): into English if the main body is written in Arabic, into Arabic if the main body is written in any other language. Give the translation only, and keep names, numbers and dates as they are."),
+                    Send("Schedule a meeting", "Help me schedule a meeting about the selected email (default 1 hour, excluding 12:30-13:30 break; To/sender as Required and any CC as Optional). Before checking calendars, briefly confirm with me: 1) duration (1 hour default) and room vs Microsoft Teams, and 2) if there are CC recipients on the email, whether to check their calendar availability too or keep them Optional without checking their calendars.")));
             }
             else if (selectionCount >= 2)
             {

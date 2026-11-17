@@ -39,6 +39,23 @@ namespace JameelCopilot.Services.Chat
             get { lock (_lock) return _history.Count; }
         }
 
+        public string LatestAssistantText()
+        {
+            lock (_lock)
+            {
+                for (int i = _history.Count - 1; i >= 0; i--)
+                {
+                    var item = _history[i];
+                    if ((string)item?["type"] == "message" && (string)item["role"] == "assistant")
+                    {
+                        var text = ExtractText(item["content"])?.Trim();
+                        if (!string.IsNullOrEmpty(text)) return text;
+                    }
+                }
+            }
+            return null;
+        }
+
         public string ExportForClipboard()
         {
             var sb = new StringBuilder();

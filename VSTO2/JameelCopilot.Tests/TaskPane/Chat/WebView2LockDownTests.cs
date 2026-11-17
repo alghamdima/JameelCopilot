@@ -22,6 +22,7 @@ namespace JameelCopilot.Tests.TaskPane.Chat
     /// not locked down. "blocked.invalid" never resolves, and nothing here
     /// leaves the PC. Skipped where the WebView2 Runtime is not installed.
     /// </summary>
+    [Collection("Config")]
     public class WebView2LockDownTests
     {
         private sealed class WebView2FactAttribute : FactAttribute
@@ -81,10 +82,7 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                     core.WebMessageReceived += (s, e) => messageSources.Add(e.Source);
                     core.NewWindowRequested += (s, e) => { if (!e.Handled) popupsLeftUnhandled++; };
 
-                    var loaded = new TaskCompletionSource<bool>();
-                    core.NavigationCompleted += (s, e) => loaded.TrySetResult(e.IsSuccess);
-                    core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
-                    Assert.True(await Within(loaded.Task, 30), "The chat page did not load under the lock-down.");
+                    await NavigateAndWaitAsync(core);
 
                     await core.ExecuteScriptAsync(
                         "jameelcopilot.appendAssistantMessage('a1',''); jameelcopilot.appendTextDelta('a1', "
@@ -140,10 +138,7 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 {
                     await Within(WebView2Bootstrap.InitializeAsync(web, Path.Combine(root, "WebUI"), Path.Combine(root, "WebView2Data")), 60);
                     var core = web.CoreWebView2;
-                    var loaded = new TaskCompletionSource<bool>();
-                    core.NavigationCompleted += (s, e) => loaded.TrySetResult(e.IsSuccess);
-                    core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
-                    Assert.True(await Within(loaded.Task, 30), "The chat page did not load.");
+                    await NavigateAndWaitAsync(core);
                     core.WebMessageReceived += (s, e) =>
                     {
                         sources.Add(e.Source);
@@ -359,10 +354,7 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 {
                     await Within(WebView2Bootstrap.InitializeAsync(web, Path.Combine(root, "WebUI"), Path.Combine(root, "WebView2Data")), 60);
                     var core = web.CoreWebView2;
-                    var loaded = new TaskCompletionSource<bool>();
-                    core.NavigationCompleted += (s, e) => loaded.TrySetResult(e.IsSuccess);
-                    core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
-                    Assert.True(await Within(loaded.Task, 30), "The chat page did not load.");
+                    await NavigateAndWaitAsync(core);
                     core.WebMessageReceived += (s, e) => messages.Add(e.TryGetWebMessageAsString());
 
                     page = JObject.Parse(JsonConvert.DeserializeObject<string>(await core.ExecuteScriptAsync(DriveThePane)));
@@ -561,10 +553,7 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 {
                     await Within(WebView2Bootstrap.InitializeAsync(web, Path.Combine(root, "WebUI"), Path.Combine(root, "WebView2Data")), 60);
                     var core = web.CoreWebView2;
-                    var loaded = new TaskCompletionSource<bool>();
-                    core.NavigationCompleted += (s, e) => loaded.TrySetResult(e.IsSuccess);
-                    core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
-                    Assert.True(await Within(loaded.Task, 30), "The chat page did not load.");
+                    await NavigateAndWaitAsync(core);
                     core.WebMessageReceived += (s, e) => messages.Add(e.TryGetWebMessageAsString());
 
                     page = JObject.Parse(JsonConvert.DeserializeObject<string>(await core.ExecuteScriptAsync(DriveTheNewCards)));
@@ -624,6 +613,30 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 "{\"type\":\"rule_create\",\"payload\":{\"call\":\"r1\"}}",
             };
             Assert.Equal(expected, messages.Where(m => m != null && !m.Contains("\"ready\"")).ToArray());
+        }
+
+        private static async Task NavigateAndWaitAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core)
+        {
+            for (var attempt = 1; attempt <= 2; attempt++)
+            {
+                var loaded = new TaskCompletionSource<bool>();
+                EventHandler<Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs> onNav = (s, e) => loaded.TrySetResult(e.IsSuccess);
+                core.NavigationCompleted += onNav;
+                try
+                {
+                    core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
+                    if (await Task.WhenAny(loaded.Task, Task.Delay(TimeSpan.FromSeconds(15))) == loaded.Task)
+                    {
+                        if (await loaded.Task) return;
+                        continue;
+                    }
+                }
+                finally
+                {
+                    core.NavigationCompleted -= onNav;
+                }
+            }
+            throw new TimeoutException("WebView2 navigation did not answer within 30 s.");
         }
 
         // Runs the body on an STA thread with a message loop, in an off-screen window.

@@ -62,9 +62,16 @@ namespace JameelCopilot.Services.Tools
                             new JProperty("body_plaintext", m.BodyPlaintext ?? ""),
                             new JProperty("body_truncated", m.BodyTruncated),
                             new JProperty("attachments", new JArray((m.Attachments ?? new AttachmentSummary[0]).Select(a =>
-                                new JObject(
+                            {
+                                var attObj = new JObject(
                                     new JProperty("filename", a.Filename ?? ""),
-                                    new JProperty("size_bytes", a.SizeBytes))))),
+                                    new JProperty("size_bytes", a.SizeBytes));
+                                if (!string.IsNullOrEmpty(a.ContentPlaintext))
+                                {
+                                    attObj.Add("content_plaintext", a.ContentPlaintext);
+                                }
+                                return attObj;
+                            }))),
                             new JProperty("in_reply_to_message_id", m.InReplyToMessageId ?? ""),
                             new JProperty("conversation_topic", m.ConversationTopic ?? ""))))));
                 return Task.FromResult(json.ToString(Newtonsoft.Json.Formatting.None));
