@@ -28,12 +28,12 @@ namespace JameelCopilot.Services
         /// <summary>The emails to rank: unread mail of the last 7 days, topped up with all mail of the last 2 days when that is little.</summary>
         public static SearchMessagesArgs UnreadArgs(DateTimeOffset now) => new SearchMessagesArgs
         {
-            ReadStatus = "unread", DateFrom = now.AddDays(-7), MaxResults = 40, SortOrder = "newest",
+            FolderId = "inbox", Scope = "current_folder", ReadStatus = "unread", DateFrom = now.AddDays(-7), MaxResults = 40, SortOrder = "newest",
         };
 
         public static SearchMessagesArgs RecentArgs(DateTimeOffset now) => new SearchMessagesArgs
         {
-            DateFrom = now.AddDays(-2), MaxResults = 25, SortOrder = "newest",
+            FolderId = "inbox", Scope = "current_folder", DateFrom = now.AddDays(-2), MaxResults = 25, SortOrder = "newest",
         };
 
         public static List<MessageSummary> Candidates(IEnumerable<MessageSummary> unread, IEnumerable<MessageSummary> recent)

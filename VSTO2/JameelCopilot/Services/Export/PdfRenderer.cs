@@ -365,23 +365,7 @@ namespace JameelCopilot.Services.Export
 
         private static void EnsureWebUiResources()
         {
-            Directory.CreateDirectory(WebView2Bootstrap.WebUiFolder);
-
-            var assembly = Assembly.GetExecutingAssembly();
-            const string prefix = "JameelCopilot.WebUI.";
-            foreach (var name in assembly.GetManifestResourceNames())
-            {
-                if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                var relative = WebView2Bootstrap.ResourceNameToRelativePath(name.Substring(prefix.Length));
-                var targetPath = Path.Combine(WebView2Bootstrap.WebUiFolder, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
-
-                using (var src = assembly.GetManifestResourceStream(name))
-                using (var dst = File.Create(targetPath))
-                {
-                    src.CopyTo(dst);
-                }
-            }
+            WebView2Bootstrap.ExtractEmbeddedWebUi(WebView2Bootstrap.WebUiFolder);
         }
 
         private static void DeleteOutputFile(string outputPath)

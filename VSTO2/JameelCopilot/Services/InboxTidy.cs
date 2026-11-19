@@ -29,7 +29,7 @@ namespace JameelCopilot.Services
         // Unflagged only, so Undo (no flag) is exactly how it was.
         public static SearchMessagesArgs Args(DateTimeOffset now) => new SearchMessagesArgs
         {
-            ReadStatus = "unread", FlagStatus = "unflagged", DateFrom = now.AddDays(-14), MaxResults = 50, SortOrder = "newest",
+            FolderId = "inbox", Scope = "current_folder", ReadStatus = "unread", FlagStatus = "unflagged", DateFrom = now.AddDays(-14), MaxResults = 50, SortOrder = "newest",
         };
 
         public static string Instructions(string language) =>

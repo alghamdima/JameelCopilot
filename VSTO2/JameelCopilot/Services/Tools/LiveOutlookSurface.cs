@@ -33,6 +33,8 @@ namespace JameelCopilot.Services.Tools
             new Dictionary<string, Tuple<DateTime, string>>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, Tuple<DateTime, string>> _roomGridCache =
             new Dictionary<string, Tuple<DateTime, string>>(StringComparer.OrdinalIgnoreCase);
+        private List<Outlook.MAPIFolder> _cachedAllMailFolders;
+        private DateTime _cachedAllMailFoldersUtc;
         private OrgContextInfo _cachedOrg;
         private List<Tuple<string, string>> _cachedRoomIdentities;
         private readonly Outlook.Application _application;
@@ -390,10 +392,7 @@ namespace JameelCopilot.Services.Tools
                 }
             }
 
-            bool useAdvancedSearch =
-                (!string.IsNullOrEmpty(args.FolderId) || scopeMode == "current_folder")
-                && string.IsNullOrEmpty(args.Query)
-                && string.IsNullOrEmpty(args.BodyContains);
+            bool useAdvancedSearch = !string.IsNullOrEmpty(args.FolderId) || scopeMode == "current_folder";
 
             if (useAdvancedSearch)
             {
@@ -430,9 +429,7 @@ namespace JameelCopilot.Services.Tools
                     JameelCopilot.Diagnostics.TraceLog.Write(
                         "SearchMessages primary=AdvancedSearch complete raw_count=" + primary.Items.Count,
                         "LiveOutlookSurface");
-                    return _marshaller.RunAsync(
-                        () => SearchResultProjector.Project(primary.Items, args, _classifier),
-                        ct).GetAwaiter().GetResult();
+                    return ProjectWithYieldedSnippets(primary.Items, args, ct);
                 }
 
                 var reason = primary.TimedOut ? "timeout" :
@@ -573,45 +570,65 @@ namespace JameelCopilot.Services.Tools
             var capped = ids.Take(maxItems).ToArray();
             var results = new List<MessageDetail>(capped.Length);
 
-            _marshaller.RunAsync(() =>
+            foreach (var shortId in capped)
             {
-                foreach (var shortId in capped)
+                ct.ThrowIfCancellationRequested();
+                var currentId = shortId;
+                MessageDetail rawDetail = _marshaller.RunAsync(() =>
                 {
-                    ct.ThrowIfCancellationRequested();
                     try
                     {
-                        var entryId = _ids.Resolve(shortId);
+                        var entryId = _ids.Resolve(currentId);
                         var item = _application.Session.GetItemFromID(entryId) as Outlook.MailItem;
-                        if (item == null) continue;
-                        results.Add(BuildMessageDetail(shortId, item, includeBody));
+                        if (item == null) return null;
+                        return BuildMessageDetail(currentId, item, includeBody, stripOffThread: true);
                     }
                     catch (COMException ex)
                     {
-                        try { JameelCopilot.Diagnostics.TraceLog.Write("ReadMessages COMException id=" + shortId + ": " + ex.Message, "LiveOutlookSurface"); } catch { }
+                        try { JameelCopilot.Diagnostics.TraceLog.Write("ReadMessages COMException id=" + currentId + ": " + ex.Message, "LiveOutlookSurface"); } catch { }
+                        return null;
                     }
                     catch (System.Collections.Generic.KeyNotFoundException)
                     {
-                        try { JameelCopilot.Diagnostics.TraceLog.Write("ReadMessages unknown short id=" + shortId, "LiveOutlookSurface"); } catch { }
+                        try { JameelCopilot.Diagnostics.TraceLog.Write("ReadMessages unknown short id=" + currentId, "LiveOutlookSurface"); } catch { }
+                        return null;
                     }
-                    // Pump Outlook UI between items so a long ids[] does not
-                    // freeze the UI thread for the full read sweep.
-                    YieldUi(ct);
+                }, ct).GetAwaiter().GetResult();
+
+                if (rawDetail != null)
+                {
+                    if (includeBody && !string.IsNullOrEmpty(rawDetail.BodyPlaintext))
+                    {
+                        var stripped = ComposeBody.StripThreadSignatures(rawDetail.BodyPlaintext);
+                        if (stripped.Length > MaxBodyChars)
+                        {
+                            stripped = stripped.Substring(0, MaxBodyChars);
+                            rawDetail.BodyTruncated = true;
+                        }
+                        rawDetail.BodyPlaintext = stripped;
+                    }
+                    results.Add(rawDetail);
                 }
-            }, ct).GetAwaiter().GetResult();
+            }
 
             return results;
         }
 
         // Builds a MessageDetail for a single MailItem. Mirrors ReadMessage's
         // projection so the bulk and single tools return identical shapes.
-        private MessageDetail BuildMessageDetail(string shortId, Outlook.MailItem item, bool includeBody)
+        private MessageDetail BuildMessageDetail(string shortId, Outlook.MailItem item, bool includeBody, bool stripOffThread = false)
         {
             var body = "";
             bool truncated = false;
             if (includeBody)
             {
-                try { body = ComposeBody.StripThreadSignatures(item.Body ?? ""); } catch (COMException) { }
-                if (body.Length > MaxBodyChars)
+                try
+                {
+                    var raw = item.Body ?? "";
+                    body = stripOffThread ? raw : ComposeBody.StripThreadSignatures(raw);
+                }
+                catch (COMException) { }
+                if (!stripOffThread && body.Length > MaxBodyChars)
                 {
                     body = body.Substring(0, MaxBodyChars);
                     truncated = true;
@@ -1554,6 +1571,41 @@ namespace JameelCopilot.Services.Tools
                 return name.Length > 0 ? name : null;
             });
 
+        /// <summary>
+        /// Samples the user's own text from recent sent emails (excluding quoted
+        /// replies and trailing signatures) so "Learn my style" in Memory can
+        /// propose a concise personal writing-style note.
+        /// </summary>
+        public IReadOnlyList<string> SampleSentEmails(int max) =>
+            Run(() =>
+            {
+                var samples = new List<string>();
+                var clamp = Math.Max(1, Math.Min(max, 20));
+                try
+                {
+                    var folder = _application.Session.GetDefaultFolder(Outlook.OlDefaultFolders.olFolderSentMail);
+                    var items = folder.Items;
+                    items.Sort("[SentOn]", true);
+                    int looked = 0;
+                    foreach (var item in items)
+                    {
+                        if (samples.Count >= clamp || ++looked > 45) break;
+                        if (!(item is Outlook.MailItem mail)) continue;
+                        try
+                        {
+                            var own = ComposeBody.FromPlainText(mail.Body ?? "").Own?.Trim() ?? "";
+                            if (own.Length < 20) continue;
+                            if (own.Length > 600) own = own.Substring(0, 600);
+                            samples.Add(own);
+                            if ((samples.Count % 4) == 0) YieldUi(CancellationToken.None);
+                        }
+                        catch (COMException) { }
+                    }
+                }
+                catch (COMException) { }
+                return (IReadOnlyList<string>)samples;
+            });
+
         public OrgContextInfo GetOrgContext()
         {
             if (_cachedOrg != null) return _cachedOrg;
@@ -2243,8 +2295,10 @@ namespace JameelCopilot.Services.Tools
         private static void YieldUi(CancellationToken ct)
         {
             if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
-            try { System.Windows.Forms.Application.DoEvents(); } catch { }
-            if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
+            // Never call Application.DoEvents() on Outlook's STA UI thread: reentrant Win32/MAPI
+            // message pumping inside Outlook COM calls triggers white-screen repaint storms and
+            // leaves a plain SynchronizationContext behind. Instead, keep each marshaller.RunAsync
+            // work unit small so Outlook's own native message loop pumps cleanly between dispatches.
         }
 
         // Phase 3b yielding fallback. Walks each folder via one
@@ -2267,48 +2321,63 @@ namespace JameelCopilot.Services.Tools
             catch (OperationCanceledException) { throw; }
 
             var searched = 0;
+            bool hasBodyFilter = !string.IsNullOrEmpty(args.Query) || !string.IsNullOrEmpty(args.BodyContains);
+            string fastMetaFilter = filter;
+            if (hasBodyFilter)
+            {
+                var metaArgs = new SearchMessagesArgs
+                {
+                    SubjectContains = !string.IsNullOrEmpty(args.SubjectContains) ? args.SubjectContains : args.Query,
+                    From = args.From,
+                    To = args.To,
+                    DateFrom = args.DateFrom,
+                    DateTo = args.DateTo,
+                    AttachmentFilter = args.AttachmentFilter,
+                    ReadStatus = args.ReadStatus,
+                    FlagStatus = args.FlagStatus,
+                    ImportanceFilter = args.ImportanceFilter,
+                    SortOrder = args.SortOrder,
+                    MaxResults = args.MaxResults,
+                };
+                fastMetaFilter = BuildRestrictFilter(metaArgs);
+            }
+
             foreach (var folder in folders)
             {
                 ct.ThrowIfCancellationRequested();
-                // Skip synchronous unindexed full-body scans across large/secondary folders when
-                // query/body_contains is used: only run unindexed body GetTable on Inbox, Sent Items,
-                // or the active folder so a 44-folder body scan never stalls Exchange RPC for 15-25s!
-                bool hasBodyFilter = !string.IsNullOrEmpty(args.Query) || !string.IsNullOrEmpty(args.BodyContains);
-                string effectiveFilter = filter;
-                if (hasBodyFilter && searched >= 3 && searchAllMail && string.IsNullOrEmpty(args.FolderId))
+                // Synchronous folder.GetTable() with unindexed textdescription LIKE '%...%' freezes
+                // Outlook's UI thread for 12-25s on large Exchange folders ( causing white-screen flashes).
+                // Try indexed metadata (Subject/From/To) on the Table API first; for primary folders
+                // with 0 subject hits on current_folder scope, use async Application.AdvancedSearch!
+                string effectiveFilter = hasBodyFilter ? fastMetaFilter : filter;
+
+                List<MessageProjectionInput> folderInputs = null;
+                if (hasBodyFilter && !searchAllMail && _runner != null)
                 {
-                    var fname = SafeFolderName(folder);
-                    bool isPrimary = string.Equals(fname, "Inbox", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(fname, "Sent Items", StringComparison.OrdinalIgnoreCase);
-                    if (!isPrimary)
+                    string folderPath = "";
+                    try { folderPath = _marshaller.RunAsync(() => { try { return folder?.FolderPath ?? ""; } catch (COMException) { return ""; } }, ct).GetAwaiter().GetResult(); }
+                    catch (OperationCanceledException) { throw; }
+                    if (!string.IsNullOrEmpty(folderPath))
                     {
-                        // On secondary folders, search indexed Subject/From/To metadata instead of unindexed Body blobs.
-                        var metaArgs = new SearchMessagesArgs
+                        var asyncBody = _runner.RunAsync("'" + folderPath.Replace("'", "''") + "'", filter, false, TimeSpan.FromSeconds(6), ct).GetAwaiter().GetResult();
+                        if (asyncBody.Cancelled) throw new OperationCanceledException(ct);
+                        if (asyncBody.Completed && asyncBody.Items != null)
                         {
-                            SubjectContains = !string.IsNullOrEmpty(args.SubjectContains) ? args.SubjectContains : args.Query,
-                            From = args.From,
-                            To = args.To,
-                            DateFrom = args.DateFrom,
-                            DateTo = args.DateTo,
-                            AttachmentFilter = args.AttachmentFilter,
-                            ReadStatus = args.ReadStatus,
-                            FlagStatus = args.FlagStatus,
-                            ImportanceFilter = args.ImportanceFilter,
-                            SortOrder = args.SortOrder,
-                            MaxResults = args.MaxResults,
-                        };
-                        effectiveFilter = BuildRestrictFilter(metaArgs);
+                            folderInputs = asyncBody.Items.ToList();
+                        }
                     }
                 }
 
-                List<MessageProjectionInput> folderInputs;
-                try
+                if (folderInputs == null)
                 {
-                    folderInputs = _marshaller.RunAsync(
-                        () => CollectFolderInputs(folder, args, effectiveFilter, ct),
-                        ct).GetAwaiter().GetResult();
+                    try
+                    {
+                        folderInputs = _marshaller.RunAsync(
+                            () => CollectFolderInputs(folder, args, effectiveFilter, ct),
+                            ct).GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException) { throw; }
                 }
-                catch (OperationCanceledException) { throw; }
                 allInputs.AddRange(folderInputs);
                 searched++;
                 try
@@ -2319,6 +2388,14 @@ namespace JameelCopilot.Services.Tools
                         "LiveOutlookSurface");
                 }
                 catch { }
+
+                if (searchAllMail && args.MaxResults > 0 && args.MaxResults < int.MaxValue
+                    && SearchFallbackBudget.DescendingForSortOrder(args.SortOrder)
+                    && allInputs.Count >= args.MaxResults && searched >= 2)
+                {
+                    earlyStop = searched < folders.Count;
+                    break;
+                }
 
                 if (SearchFallbackBudget.ShouldStopRecipientAllMailScan(args, scopeMode, allInputs.Count))
                 {
@@ -2353,15 +2430,54 @@ namespace JameelCopilot.Services.Tools
                 }
             }
 
-            var projected = _marshaller.RunAsync(
-                () => SearchResultProjector.Project(allInputs, args, _classifier, () => YieldUi(ct)),
-                ct).GetAwaiter().GetResult();
-            // Early-stop means we abandoned the scan before walking all folders,
-            // so the page is necessarily incomplete even if the projector did
-            // not clamp it. Force Truncated so the model never treats a
-            // partial scan as the complete result set.
+            var projected = ProjectWithYieldedSnippets(allInputs, args, ct);
             if (earlyStop) projected.Truncated = true;
             return projected;
+        }
+
+        private SearchResult ProjectWithYieldedSnippets(
+            IReadOnlyList<MessageProjectionInput> allInputs, SearchMessagesArgs args, CancellationToken ct)
+        {
+            // Sort and clamp in pure C# OFF the UI thread, then evaluate each survivor's
+            // SnippetFactory in its OWN tiny UI-thread post so Outlook never stalls across 25 items!
+            var items = allInputs ?? new MessageProjectionInput[0];
+            var preProjected = SearchResultProjector.Project(
+                items.Select(i => i == null ? null : new MessageProjectionInput
+                {
+                    Id = i.Id,
+                    Subject = i.Subject,
+                    From = i.From,
+                    To = i.To,
+                    ReceivedAt = i.ReceivedAt,
+                    HasAttachments = i.HasAttachments,
+                    FolderName = i.FolderName,
+                    FolderDefaultItemTypeIsMail = i.FolderDefaultItemTypeIsMail,
+                    SnippetFactory = null,
+                }),
+                args,
+                _classifier);
+
+            var factoryById = new Dictionary<string, Func<string>>(StringComparer.Ordinal);
+            foreach (var inp in items)
+            {
+                if (inp != null && !string.IsNullOrEmpty(inp.Id) && inp.SnippetFactory != null && !factoryById.ContainsKey(inp.Id))
+                    factoryById[inp.Id] = inp.SnippetFactory;
+            }
+            int snippetsRead = 0;
+            foreach (var msg in preProjected.Messages)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (snippetsRead >= 45) break;
+                if (factoryById.TryGetValue(msg.Id, out var fn))
+                {
+                    msg.Snippet = _marshaller.RunAsync(() =>
+                    {
+                        try { return fn() ?? ""; } catch { return ""; }
+                    }, ct).GetAwaiter().GetResult();
+                    snippetsRead++;
+                }
+            }
+            return preProjected;
         }
 
         // Collect one folder's worth of MessageProjectionInput using Outlook's
@@ -2407,10 +2523,10 @@ namespace JameelCopilot.Services.Tools
                 table.Columns.Add("To");
                 table.Columns.Add("ReceivedTime");
                 table.Columns.Add("MessageClass");
-                // Use DASL for hasattachment so we get a clean bool. The
-                // friendly name "HasAttachments" works on most builds but
-                // is not guaranteed across Outlook versions.
+                // Use DASL for hasattachment so we get a clean bool, plus a 255-char body preview
+                // straight from the server-side MAPI table so up to 50-10000 items get snippets in 0 ms!
                 try { table.Columns.Add("urn:schemas:httpmail:hasattachment"); } catch { }
+                try { table.Columns.Add("http://schemas.microsoft.com/mapi/proptag/0x1000001F"); } catch { }
             }
             catch (COMException ex)
             {
@@ -2503,20 +2619,31 @@ namespace JameelCopilot.Services.Tools
             catch (COMException) { }
             catch (System.Runtime.InteropServices.InvalidComObjectException) { }
 
-            var capturedEntryId = entryId;
-            var application = _application;
-            Func<string> snippetFactory = () =>
+            string tableBodyPreview = null;
+            try
             {
-                if (string.IsNullOrEmpty(capturedEntryId)) return "";
-                try
+                var bp = row["http://schemas.microsoft.com/mapi/proptag/0x1000001F"] as string;
+                if (!string.IsNullOrEmpty(bp)) tableBodyPreview = SnippetOf(bp);
+            }
+            catch { }
+
+            var capturedEntryId = entryId;
+            var capturedPreview = tableBodyPreview;
+            var application = _application;
+            Func<string> snippetFactory = capturedPreview != null
+                ? (Func<string>)(() => capturedPreview)
+                : () =>
                 {
-                    var item = application.Session.GetItemFromID(capturedEntryId) as Outlook.MailItem;
-                    if (item == null) return "";
-                    return SnippetOf(item.Body);
-                }
-                catch (COMException) { return ""; }
-                catch (System.Collections.Generic.KeyNotFoundException) { return ""; }
-            };
+                    if (string.IsNullOrEmpty(capturedEntryId)) return "";
+                    try
+                    {
+                        var item = application.Session.GetItemFromID(capturedEntryId) as Outlook.MailItem;
+                        if (item == null) return "";
+                        return SnippetOf(item.Body);
+                    }
+                    catch (COMException) { return ""; }
+                    catch (System.Collections.Generic.KeyNotFoundException) { return ""; }
+                };
 
             return new MessageProjectionInput
             {
@@ -2612,19 +2739,27 @@ namespace JameelCopilot.Services.Tools
                 catch { }
             }
 
+            if (_cachedAllMailFolders != null && (DateTime.UtcNow - _cachedAllMailFoldersUtc).TotalMinutes < 2)
+            {
+                return _cachedAllMailFolders.Count <= folderLimit
+                    ? (IReadOnlyList<Outlook.MAPIFolder>)_cachedAllMailFolders
+                    : _cachedAllMailFolders.Take(folderLimit).ToList();
+            }
+
             try
             {
                 foreach (Outlook.Store store in _application.Session.Stores)
                 {
                     WalkMailFolders(store.GetRootFolder(), folders, depth: 0, folderLimit, ct);
-                    // Pump Outlook UI between each store so the mailbox
-                    // tree walk does not freeze Outlook for many seconds
-                    // when the user has many stores.
-                    YieldUi(ct);
                     if (folders.Count >= folderLimit) break;
                 }
             }
             catch (COMException) { }
+            if (folders.Count > 0 && folderLimit >= SearchFallbackBudget.MaxListFolders)
+            {
+                _cachedAllMailFolders = folders;
+                _cachedAllMailFoldersUtc = DateTime.UtcNow;
+            }
             var elapsedMs = (long)(DateTimeOffset.UtcNow - started).TotalMilliseconds;
             try { JameelCopilot.Diagnostics.TraceLog.Write("ResolveSearchFolders elapsed_ms=" + elapsedMs + " folders=" + folders.Count + " cap=" + folderLimit, "LiveOutlookSurface"); } catch { }
             return folders;
@@ -2668,7 +2803,7 @@ namespace JameelCopilot.Services.Tools
 
         private Outlook.MAPIFolder ResolveFolder(string folderId)
         {
-            if (string.IsNullOrEmpty(folderId))
+            if (string.IsNullOrEmpty(folderId) || string.Equals(folderId, "inbox", StringComparison.OrdinalIgnoreCase))
             {
                 try { return _application.Session.GetDefaultFolder(Outlook.OlDefaultFolders.olFolderInbox); }
                 catch (COMException) { return null; }

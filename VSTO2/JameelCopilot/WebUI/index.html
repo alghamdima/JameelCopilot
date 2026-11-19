@@ -38,6 +38,7 @@
            jameelcopilot.setQuickActions(); empty means no row at all. -->
       <div id="quickActions" class="quick-actions"></div>
       <div id="composer" class="composer">
+        <div id="mentionMenu" class="mention-menu" role="listbox" hidden></div>
         <textarea id="composerInput"
                   dir="auto"
                   class="composer-input"
@@ -70,7 +71,11 @@
         <textarea id="memoryInput" dir="auto" class="composer-input" rows="2" maxlength="300"
                   placeholder="For example: Reply to HR in Arabic. Keep my replies short."
                   aria-label="New note"></textarea>
-        <button id="btnMemoryAdd" class="btn btn-primary" type="button">Remember</button>
+        <div class="memory-add-actions">
+          <button id="btnMemoryAdd" class="btn btn-primary" type="button">Remember</button>
+          <button id="btnLearnStyle" class="btn btn-ghost" type="button" title="Analyze your recent sent emails and draft a personal writing-style note">Learn my style</button>
+          <span id="learnStyleStatus" class="panel-note"></span>
+        </div>
       </div>
       <div id="memoryList" class="panel-list"></div>
       <div class="panel-foot">

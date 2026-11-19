@@ -56,15 +56,31 @@ namespace JameelCopilot.Services
             "With nothing asked of the user, return an empty list.\n" +
             "Format: {\"todos\":[{\"task\":\"<sentence>\",\"due\":\"<yyyy-MM-dd or empty>\"}]}";
 
-        /// <summary>One email as the prompt carries it: its header on one line, its text behind "> ".</summary>
+        /// <summary>One email as the prompt carries it: its header on one line, its text and attachment text behind "> ".</summary>
         public static string EmailContext(MessageDetail message, string ownerName, string ownerEmail)
         {
+            var cc = message?.Cc != null && message.Cc.Count > 0
+                ? " | Cc: " + StructuredAnswers.OneLine(string.Join("; ", message.Cc))
+                : "";
+            var body = message?.BodyPlaintext ?? "";
+            if (message?.Attachments != null)
+            {
+                var attSb = new StringBuilder();
+                foreach (var a in message.Attachments)
+                {
+                    if (a == null || string.IsNullOrWhiteSpace(a.ContentPlaintext)) continue;
+                    attSb.Append("\n\n[Attached file ").Append(StructuredAnswers.OneLine(a.Filename ?? "attachment")).Append("]:\n")
+                         .Append(a.ContentPlaintext);
+                }
+                if (attSb.Length > 0) body = body + attSb;
+            }
             return "The user: " + StructuredAnswers.OneLine((ownerName + " <" + ownerEmail + ">").Trim()) + "\n" +
                    "From: " + StructuredAnswers.OneLine(message?.From) +
                    " | To: " + StructuredAnswers.OneLine(string.Join("; ", message?.To ?? new string[0])) +
+                   cc +
                    " | Received: " + (message?.ReceivedAt ?? DateTimeOffset.MinValue).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) +
                    " | Subject: " + StructuredAnswers.OneLine(message?.Subject) + "\n" +
-                   StructuredAnswers.Quote(message?.BodyPlaintext, 6000);
+                   StructuredAnswers.Quote(body, 9000);
         }
 
         /// <summary>

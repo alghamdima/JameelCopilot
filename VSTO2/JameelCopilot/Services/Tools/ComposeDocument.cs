@@ -49,7 +49,9 @@ namespace JameelCopilot.Services.Tools
         {
             var doc = Editor(inspector);
             if (doc == null) return false;
-            doc.Range(0, 0).InsertBefore(ComposeBody.ToWord(text) + "\r");
+            var clean = ComposeBody.CleanDraftForEmail(text, out var extractedSubject);
+            TryFillEmptySubject(inspector, extractedSubject);
+            doc.Range(0, 0).InsertBefore(ComposeBody.ToWord(clean) + "\r");
             return true;
         }
 
@@ -58,13 +60,28 @@ namespace JameelCopilot.Services.Tools
         {
             var doc = Editor(inspector);
             if (doc == null) return false;
+            var clean = ComposeBody.CleanDraftForEmail(text, out var extractedSubject);
+            TryFillEmptySubject(inspector, extractedSubject);
             Split(doc, out int ownEnd, out _);
             int end = doc.Content.End;
             // A signature or quoted message follows: the new text ends its own
             // paragraph. Otherwise the document's last paragraph mark stays.
             bool followed = ownEnd < end;
-            doc.Range(0, followed ? ownEnd : end - 1).Text = ComposeBody.ToWord(text) + (followed ? "\r" : "");
+            doc.Range(0, followed ? ownEnd : end - 1).Text = ComposeBody.ToWord(clean) + (followed ? "\r" : "");
             return true;
+        }
+
+        private static void TryFillEmptySubject(Outlook.Inspector inspector, string subject)
+        {
+            if (string.IsNullOrWhiteSpace(subject)) return;
+            try
+            {
+                if (inspector?.CurrentItem is Outlook.MailItem mail && string.IsNullOrWhiteSpace(mail.Subject))
+                {
+                    mail.Subject = subject;
+                }
+            }
+            catch (COMException) { }
         }
 
         /// <summary>
@@ -136,7 +153,7 @@ namespace JameelCopilot.Services.Tools
                         string lastLine = cleanLines[cleanLines.Length - 1].Trim();
                         if (lastLine.Length > 0)
                         {
-                            int idx = rawOwn.IndexOf(lastLine, StringComparison.Ordinal);
+                            int idx = rawOwn.LastIndexOf(lastLine, StringComparison.Ordinal);
                             if (idx >= 0)
                             {
                                 int candidateEnd = idx + lastLine.Length;

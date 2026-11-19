@@ -23,9 +23,13 @@
   function renderInline(line) {
     // Escape first, then re-introduce a small allow-list of markdown tags.
     var out = escapeHtml(line);
-    // Inline code: `...` (must come before bold/italic).
+    // Protect inline code (`...`) with placeholders before bold/italic/links so
+    // markdown characters inside code spans are never turned into HTML tags.
+    var codes = [];
     out = out.replace(/`([^`]+)`/g, function(m, code) {
-      return '<code>' + code + '</code>';
+      var idx = codes.length;
+      codes.push('<code>' + code + '</code>');
+      return '\u0000CODE' + idx + '\u0000';
     });
     // Bold: **...**
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -36,15 +40,21 @@
     out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(m, text, url) {
       return text === url ? text : text + ' (' + url + ')';
     });
+    out = out.replace(/\u0000CODE(\d+)\u0000/g, function(m, n) {
+      return codes[parseInt(n, 10)] || '';
+    });
     return out;
   }
 
   // Split a markdown table row into cells, trimming leading/trailing
-  // pipes and stripping whitespace. Returns null for non-table rows.
+  // pipes and stripping whitespace (preserving escaped \|). Returns null for non-table rows.
   function splitTableRow(line) {
     if (!/^\s*\|.*\|\s*$/.test(line)) return null;
     var body = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-    return body.split('|').map(function (c) { return c.trim(); });
+    var safe = body.replace(/\\\|/g, '\u0000PIPE\u0000');
+    return safe.split('|').map(function (c) {
+      return c.replace(/\u0000PIPE\u0000/g, '|').trim();
+    });
   }
 
   // Is this the separator row that follows the header in a GFM table?
@@ -93,14 +103,22 @@
       }
     }
 
-    function flushAll() { flushList(); flushPara(); }
+    var quoteBuf = [];
+    function flushQuote() {
+      if (quoteBuf.length > 0) {
+        html.push('<blockquote dir="auto">' + quoteBuf.map(renderInline).join('<br>') + '</blockquote>');
+        quoteBuf = [];
+      }
+    }
+
+    function flushAll() { flushList(); flushPara(); flushQuote(); }
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
 
       // Fenced code blocks first (highest precedence).
-      var fenceMatch = line.match(/^```(\w*)\s*$/);
-      if (fenceMatch) {
+      var fenceMatch = line.match(/^\s*```([^\s`]*).*$/);
+      if (fenceMatch && (!inFence || /^\s*```\s*$/.test(line))) {
         if (!inFence) {
           flushAll();
           inFence = true;
@@ -166,11 +184,12 @@
         continue;
       }
 
-      // Blockquote
+      // Blockquote (consecutive > lines join into a single blockquote)
       var quoteMatch = line.match(/^>\s?(.*)$/);
       if (quoteMatch) {
-        flushAll();
-        html.push('<blockquote dir="auto">' + renderInline(quoteMatch[1]) + '</blockquote>');
+        flushList();
+        flushPara();
+        quoteBuf.push(quoteMatch[1]);
         continue;
       }
 
@@ -178,11 +197,13 @@
       var ulMatch = line.match(/^\s*[-*]\s+(.+)$/);
       var olMatch = line.match(/^\s*\d+\.\s+(.+)$/);
       if (ulMatch) {
+        flushQuote();
         if (listType !== 'ul') { flushList(); flushPara(); listType = 'ul'; }
         listBuf.push(ulMatch[1]);
         continue;
       }
       if (olMatch) {
+        flushQuote();
         if (listType !== 'ol') { flushList(); flushPara(); listType = 'ol'; }
         listBuf.push(olMatch[1]);
         continue;
@@ -194,6 +215,7 @@
         continue;
       }
 
+      flushQuote();
       paraBuf.push(line);
     }
     if (inFence) {

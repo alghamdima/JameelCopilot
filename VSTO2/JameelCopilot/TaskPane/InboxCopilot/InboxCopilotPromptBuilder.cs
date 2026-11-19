@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using JameelCopilot.Services;
@@ -102,6 +103,66 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                   .Append(string.Join("; ", org.Peers.Take(15).Select(FormatPerson)));
             }
             return sb.ToString();
+        }
+
+        public static Newtonsoft.Json.Linq.JArray BuildPeopleHints(OrgContextInfo org, IEnumerable<string> extraAddresses = null)
+        {
+            var list = new Newtonsoft.Json.Linq.JArray();
+            var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            var myEmail = org?.User?.Email ?? "";
+
+            void AddOrgPerson(OrgPerson p, string role)
+            {
+                if (p == null) return;
+                var name = StructuredAnswers.OneLine(p.Name ?? "");
+                var email = StructuredAnswers.OneLine(p.Email ?? "");
+                if (name.Length == 0 && email.Length == 0) return;
+                if (email.Length > 0 && string.Equals(email, myEmail, System.StringComparison.OrdinalIgnoreCase)) return;
+                var key = email.Length > 0 ? email : name;
+                if (!seen.Add(key)) return;
+                var meta = StructuredAnswers.OneLine(p.JobTitle ?? "");
+                if (!string.IsNullOrEmpty(role))
+                {
+                    meta = string.IsNullOrEmpty(meta) ? role : (role + " - " + meta);
+                }
+                list.Add(new Newtonsoft.Json.Linq.JObject(
+                    new Newtonsoft.Json.Linq.JProperty("name", name),
+                    new Newtonsoft.Json.Linq.JProperty("email", email),
+                    new Newtonsoft.Json.Linq.JProperty("meta", meta)));
+            }
+
+            if (extraAddresses != null)
+            {
+                foreach (var raw in extraAddresses)
+                {
+                    var clean = StructuredAnswers.OneLine(raw ?? "");
+                    if (clean.Length == 0) continue;
+                    string nm = clean, em = "";
+                    int lt = clean.IndexOf('<'), gt = clean.IndexOf('>');
+                    if (lt >= 0 && gt > lt)
+                    {
+                        nm = clean.Substring(0, lt).Trim().Trim('"');
+                        em = clean.Substring(lt + 1, gt - lt - 1).Trim();
+                    }
+                    else if (clean.Contains("@"))
+                    {
+                        em = clean;
+                        nm = clean.Substring(0, clean.IndexOf('@'));
+                    }
+                    if (em.Length > 0 && string.Equals(em, myEmail, System.StringComparison.OrdinalIgnoreCase)) continue;
+                    var key = em.Length > 0 ? em : nm;
+                    if (!seen.Add(key)) continue;
+                    list.Add(new Newtonsoft.Json.Linq.JObject(
+                        new Newtonsoft.Json.Linq.JProperty("name", nm),
+                        new Newtonsoft.Json.Linq.JProperty("email", em),
+                        new Newtonsoft.Json.Linq.JProperty("meta", "Thread")));
+                }
+            }
+
+            AddOrgPerson(org?.Manager, "Manager");
+            foreach (var r in org?.DirectReports ?? new OrgPerson[0]) AddOrgPerson(r, "Team");
+            foreach (var p in org?.Peers ?? new OrgPerson[0]) AddOrgPerson(p, "Peer");
+            return list;
         }
 
         private static string FormatPerson(OrgPerson p)

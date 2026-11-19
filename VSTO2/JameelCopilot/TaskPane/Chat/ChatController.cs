@@ -215,6 +215,12 @@ namespace JameelCopilot.TaskPane.Chat
                     case "insert_text":
                         InsertAnswer((string)payload?["text"]);
                         break;
+                    case "learn_style":
+                        _ = RunLearnStyleAsync();
+                        break;
+                    case "schedule_search":
+                        _ = StartTurnAsync("Schedule meeting \"" + ((string)payload?["subject"] ?? "Meeting") + "\" for " + ((string)payload?["duration"] ?? "60") + " minutes.");
+                        break;
                     case "copy":
                         var clip = (string)payload?["text"] ?? _store.LatestAssistantText() ?? _store.ExportForClipboard();
                         try { Clipboard.SetText(clip ?? ""); } catch { /* clipboard occasionally throws on Outlook */ }
@@ -257,6 +263,11 @@ namespace JameelCopilot.TaskPane.Chat
                 var chips = ComposeChips.Groups(isReply);
                 chips.Add(_chats.PromptsGroup());
                 _ = RunScript("jameelcopilot.setQuickActions(" + chips.ToString(Newtonsoft.Json.Formatting.None) + ");");
+
+                var extraAddrs = new List<string>();
+                if (state?.ToRecipients != null) extraAddrs.AddRange(state.ToRecipients);
+                if (state?.CcRecipients != null) extraAddrs.AddRange(state.CcRecipients);
+                _ = PushPeopleHintsAsync(extraAddrs);
             }
             catch (Exception ex)
             {
@@ -289,7 +300,7 @@ namespace JameelCopilot.TaskPane.Chat
                 // and then sync the diff back into the store at the end.
                 var initialSnapshot = _store.Snapshot();
                 var composeContext = await Task.Run(() => BuildComposeContext(), _activeCts.Token);
-                var memoryBlock = await Task.Run(() => _chats.Memory, _activeCts.Token);
+                var memoryBlock = _chats.Memory;
                 var ctx = new ConversationContext
                 {
                     SystemInstructions = SystemPromptBuilder.Pane("compose"),
@@ -302,6 +313,20 @@ namespace JameelCopilot.TaskPane.Chat
 
                 var sink = new WebViewSink(this, assistantId);
                 var result = await _chat.RunTurnAsync(ctx, userText, _toolHost, sink, _activeCts.Token);
+                if (result.StopReason == StopReason.MaxRoundsReached && string.IsNullOrWhiteSpace(result.FinalAssistantText))
+                {
+                    ctx.UseTools = false;
+                    var synth = await _chat.RunTurnAsync(
+                        ctx,
+                        "Using the messages and calendar items already found above, write the complete, concise answer to my original request now (in the language of my original message).",
+                        _toolHost,
+                        sink,
+                        _activeCts.Token);
+                    if (!string.IsNullOrWhiteSpace(synth.FinalAssistantText))
+                    {
+                        result = synth;
+                    }
+                }
 
                 // Sync newly-appended items (user msg + assistant + tool round-
                 // trips) back into the store so the next turn starts from the
@@ -313,7 +338,7 @@ namespace JameelCopilot.TaskPane.Chat
                     {
                         _store.Append(ctx.History[i]);
                     }
-                    _ = Task.Run(() => _chats.Save());
+                    _chats.Save();
                 }
 
                 var opts = new JObject(
@@ -365,7 +390,7 @@ namespace JameelCopilot.TaskPane.Chat
         private async Task RunReviewAsync()
         {
             if (_turnInFlight || !_isReady) return;
-            var compose = _surface?.GetCurrentComposeState(includeFullBody: true);
+            var compose = await Task.Run(() => _surface?.GetCurrentComposeState(includeFullBody: true));
             if (string.IsNullOrWhiteSpace(compose?.BodyPlaintext))
             {
                 await RunScript("jameelcopilot.appendAuditRow(" + JsString("Write your email first, then press Review.") + ");");
@@ -399,7 +424,9 @@ namespace JameelCopilot.TaskPane.Chat
                 _reviews[id] = points;
                 await RunScript("jameelcopilot.showReview(" + JsString(id) + ", " + JsString(summary) + ", " +
                                 DraftCoaching.ToJson(points).ToString(Newtonsoft.Json.Formatting.None) + ");");
-                _store.Append(HistoryMessage("user", "Review my draft."));
+                var chipLine = HistoryMessage("user", "Review my draft.");
+                chipLine.Add(StructuredAnswers.ChipLineMark, true);
+                _store.Append(chipLine);
                 _store.Append(HistoryMessage("assistant", DraftCoaching.AsText(summary, points)));
                 _chats.Save();
             }
@@ -491,7 +518,7 @@ namespace JameelCopilot.TaskPane.Chat
                 ctx.SystemInstructions = ComposePrompt.Instructions(action, compose);
                 ctx.Context = ComposePrompt.Context(compose, includeDraft: false);
                 ctx.Temperature = _prefs.Temperature;
-                ctx.Memory = await Task.Run(() => _chats.Memory, _activeCts.Token);
+                ctx.Memory = _chats.Memory;
                 var userMessage = ComposePrompt.UserMessage(action, compose, instructions ?? "");
 
                 var result = await _chat.RunTurnAsync(ctx, userMessage, _toolHost, new WebViewSink(this, id), _activeCts.Token);
@@ -506,9 +533,14 @@ namespace JameelCopilot.TaskPane.Chat
 
                 _drafts[id] = new Draft { Action = action, Instructions = instructions, Text = text, Selection = selection };
                 // The chat keeps what was asked and what Jameel Copilot wrote, so "make it shorter" has something to work on.
-                _store.Append(HistoryMessage("user", ComposeChips.Asked(action, writesReply, instructions)));
+                var askedLine = HistoryMessage("user", ComposeChips.Asked(action, writesReply, instructions));
+                if (action != CustomApiChatService.ActionType.Draft && string.IsNullOrWhiteSpace(instructions))
+                {
+                    askedLine.Add(StructuredAnswers.ChipLineMark, true);
+                }
+                _store.Append(askedLine);
                 _store.Append(HistoryMessage("assistant", text));
-                _ = Task.Run(() => _chats.Save());
+                _chats.Save();
                 await RunScript(ComposeChips.FinalizeScript(id,
                     selection != null ? ComposeChips.SelectionButtons() : ComposeChips.DraftButtons(hasOwnText), "not in the email yet",
                     writesReply ? ComposePrompt.WroteReply : null, false));
@@ -655,19 +687,30 @@ namespace JameelCopilot.TaskPane.Chat
             {
                 if (callId != null && _meetings.TryGetValue(callId, out var proposal) && _surface != null)
                 {
+                    var chosenRoom = proposal.Room;
                     if (roomIndex >= 0 && proposal.RoomOptions != null && roomIndex < proposal.RoomOptions.Count)
                     {
-                        proposal = new MeetingProposal
+                        var opt = proposal.RoomOptions[roomIndex];
+                        chosenRoom = opt.Value;
+                        if (opt.FreeSlots != null && opt.FreeSlots.Count > 0 && !opt.FreeSlots.Contains(slot))
                         {
-                            Subject = proposal.Subject,
-                            Attendees = proposal.Attendees,
-                            OptionalAttendees = proposal.OptionalAttendees,
-                            Slots = proposal.Slots,
-                            Agenda = proposal.Agenda,
-                            Room = proposal.RoomOptions[roomIndex].Value,
-                            RoomOptions = proposal.RoomOptions,
-                        };
+                            var slotFree = (proposal.SlotFreeRoomValues != null && slot >= 0 && slot < proposal.SlotFreeRoomValues.Count)
+                                ? proposal.SlotFreeRoomValues[slot]?.FirstOrDefault()
+                                : null;
+                            chosenRoom = !string.IsNullOrEmpty(slotFree) ? slotFree : "Microsoft Teams Meeting";
+                        }
                     }
+                    proposal = new MeetingProposal
+                    {
+                        Subject = proposal.Subject,
+                        Attendees = proposal.Attendees,
+                        OptionalAttendees = proposal.OptionalAttendees,
+                        Slots = proposal.Slots,
+                        Agenda = proposal.Agenda,
+                        Room = chosenRoom,
+                        RoomOptions = proposal.RoomOptions,
+                        SlotFreeRoomValues = proposal.SlotFreeRoomValues,
+                    };
                     opened = _surface.OpenMeetingRequest(proposal, slot);
                 }
             }
@@ -696,6 +739,62 @@ namespace JameelCopilot.TaskPane.Chat
             if (!opened)
             {
                 _ = RunScript("jameelcopilot.appendAuditRow(" + JsString("That email could not be opened. It may have been moved or deleted.") + ");");
+            }
+        }
+
+        private async Task PushPeopleHintsAsync(IReadOnlyList<string> extraAddresses)
+        {
+            if (_isDisposed || !_isReady || _surface == null) return;
+            try
+            {
+                var org = await Task.Run(() => (_surface as IOrgSurface)?.GetOrgContext());
+                var hints = InboxCopilot.InboxCopilotPromptBuilder.BuildPeopleHints(org, extraAddresses);
+                await RunScript("jameelcopilot.setPeopleHints(" + hints.ToString(Newtonsoft.Json.Formatting.None) + ");");
+            }
+            catch (Exception ex)
+            {
+                TraceLog.Write("PushPeopleHintsAsync error: " + ex.GetType().Name, "ChatController");
+            }
+        }
+
+        private async Task RunLearnStyleAsync()
+        {
+            if (_isDisposed || !_isReady || _surface == null || _turnInFlight)
+            {
+                await RunScript("jameelcopilot.setMemoryDraft('', 'Finish the active request first.');");
+                return;
+            }
+            try
+            {
+                var samples = await Task.Run(() => _surface.SampleSentEmails(12));
+                if (samples == null || samples.Count == 0)
+                {
+                    await RunScript("jameelcopilot.setMemoryDraft('', 'No sent emails found to analyze yet.');");
+                    return;
+                }
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < samples.Count; i++)
+                {
+                    sb.Append("--- Sent sample ").Append(i + 1).Append(" ---\n").Append(samples[i]).Append("\n\n");
+                }
+                var ctx = CustomApiChatService.NewActionContext(CustomApiChatService.ActionType.Custom);
+                ctx.SystemInstructions = ComposePrompt.LearnStyleInstructions;
+                ctx.Context = sb.ToString();
+                ctx.Temperature = _prefs.Temperature;
+                var result = await _chat.RunTurnAsync(ctx, "Summarize my personal email writing style as one memory note.", _toolHost, new QuietSink(), CancellationToken.None);
+                var note = UserMemoryService.Clean(result.FinalAssistantText);
+                if (result.StopReason != StopReason.Completed || string.IsNullOrEmpty(note))
+                {
+                    await RunScript("jameelcopilot.setMemoryDraft('', 'Could not analyze style right now. Try again.');");
+                    return;
+                }
+                await RunScript("jameelcopilot.setMemoryDraft(" + JsString(note) + ", " +
+                    JsString("Drafted from " + samples.Count + " sent emails - review & press Remember.") + ");");
+            }
+            catch (Exception ex)
+            {
+                TraceLog.Write("RunLearnStyleAsync failed: " + ex.GetType().Name, "ChatController");
+                await RunScript("jameelcopilot.setMemoryDraft('', 'Could not analyze style right now.');");
             }
         }
 

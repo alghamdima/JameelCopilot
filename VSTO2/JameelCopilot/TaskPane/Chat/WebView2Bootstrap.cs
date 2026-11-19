@@ -191,6 +191,8 @@ namespace JameelCopilot.TaskPane.Chat
             }
         }
 
+        private static readonly object _extractLock = new object();
+
         /// <summary>
         /// Copies every <c>WebUI\*</c> embedded resource from the JameelCopilot
         /// assembly into the given folder. Replaces any existing
@@ -198,34 +200,34 @@ namespace JameelCopilot.TaskPane.Chat
         /// embedded with logical names like
         /// <c>JameelCopilot.WebUI.index.html</c>.
         /// </summary>
-        private static void ExtractEmbeddedWebUi(string webUiFolder)
+        internal static void ExtractEmbeddedWebUi(string webUiFolder)
         {
-            var asm = Assembly.GetExecutingAssembly();
-            const string prefix = "JameelCopilot.WebUI.";
-            foreach (var name in asm.GetManifestResourceNames())
+            lock (_extractLock)
             {
-                if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                // Logical name -> relative file path. "." in resource names is
-                // ambiguous (folder separator vs filename "."), so we only
-                // treat the LAST "." before the extension as the file
-                // extension boundary, and earlier "." as folder separators.
-                var relative = ResourceNameToRelativePath(name.Substring(prefix.Length));
-                var targetPath = Path.Combine(webUiFolder, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
-
-                using (var src = asm.GetManifestResourceStream(name))
+                Directory.CreateDirectory(webUiFolder);
+                var asm = Assembly.GetExecutingAssembly();
+                const string prefix = "JameelCopilot.WebUI.";
+                foreach (var name in asm.GetManifestResourceNames())
                 {
-                    if (relative == "index.html")
+                    if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                    var relative = ResourceNameToRelativePath(name.Substring(prefix.Length));
+                    var targetPath = Path.Combine(webUiFolder, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
+
+                    using (var src = asm.GetManifestResourceStream(name))
                     {
-                        using (var reader = new StreamReader(src))
+                        if (relative == "index.html")
                         {
-                            File.WriteAllText(targetPath, VersionedIndex(reader.ReadToEnd(), PageVersion));
+                            using (var reader = new StreamReader(src))
+                            {
+                                File.WriteAllText(targetPath, VersionedIndex(reader.ReadToEnd(), PageVersion));
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                    using (var dst = File.Create(targetPath))
-                    {
-                        src.CopyTo(dst);
+                        using (var dst = File.Create(targetPath))
+                        {
+                            src.CopyTo(dst);
+                        }
                     }
                 }
             }

@@ -55,6 +55,14 @@ namespace JameelCopilot.Services.Tools
                 // min(ceiling, total) and SearchResultProjector clamps its output
                 // globally to MaxResults (not per-folder), so the report can never
                 // claim it exported more than the total.
+                // When scope is "auto" without an explicit folder_id, upgrade to "all_mail" so
+                // CountMessages and SearchMessages traverse the exact same folder set.
+                if (string.IsNullOrEmpty(args.Filter.FolderId)
+                    && string.Equals((args.Filter.Scope ?? "auto").Trim(), "auto", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Filter.Scope = "all_mail";
+                }
+
                 // True total (count-mode, bounded per folder).
                 var total = surface.CountMessages(args.Filter, ct);
                 if (total <= 0)

@@ -92,17 +92,19 @@ namespace JameelCopilot.Services
                 }
                 if (SignOffLine.IsMatch(trimmed))
                 {
-                    // Check if what follows is a real signature block (name + title/contact markers), not just a standalone "Thanks" at the end of a draft.
+                    // Check if what follows is a real signature block (name + title/contact markers), not a P.S. paragraph.
                     int remainingNonEmpty = 0;
                     bool hasMarker = false;
+                    bool allShortUnpunctuated = true;
                     for (int j = i + 1; j < cutAt; j++)
                     {
                         var sub = lines[j].Trim();
                         if (sub.Length == 0) continue;
                         remainingNonEmpty++;
                         if (SignatureContactMarker.IsMatch(sub)) hasMarker = true;
+                        if (sub.Length > 55 || sub.EndsWith(".") || sub.EndsWith("?") || sub.EndsWith("!")) allShortUnpunctuated = false;
                     }
-                    if (hasMarker || (remainingNonEmpty >= 1 && remainingNonEmpty <= 6))
+                    if (hasMarker || (allShortUnpunctuated && remainingNonEmpty >= 1 && remainingNonEmpty <= 4))
                     {
                         cutAt = i;
                         break;
@@ -111,20 +113,25 @@ namespace JameelCopilot.Services
             }
 
             // 3. Even without a sign-off word (e.g. a compose window with a manual signature pasted at the bottom),
-            //    detect a trailing corporate signature block containing phone/PO Box/company markers in the last 14 lines.
-            if (cutAt == lines.Length || cutAt > 0)
+            //    detect a trailing corporate signature block when at least 2 distinct signature/contact lines sit at the bottom
+            //    (so mentioning a colleague's email or phone in a normal sentence is never stripped).
+            if (cutAt > 0)
             {
                 int searchStart = System.Math.Max(0, cutAt - 14);
                 int firstMarker = -1;
+                int markerCount = 0;
                 for (int i = searchStart; i < cutAt; i++)
                 {
-                    if (SignatureContactMarker.IsMatch(lines[i]))
+                    var candidateLine = lines[i].Trim();
+                    if (candidateLine.Length == 0 || candidateLine.Length > 95) continue;
+                    if (candidateLine.EndsWith("?") || candidateLine.EndsWith("!")) continue;
+                    if (SignatureContactMarker.IsMatch(candidateLine))
                     {
-                        firstMarker = i;
-                        break;
+                        if (firstMarker < 0) firstMarker = i;
+                        markerCount++;
                     }
                 }
-                if (firstMarker >= 0)
+                if (firstMarker >= 0 && markerCount >= 2)
                 {
                     // Walk up 1-3 non-empty short lines above the first phone/email/company marker (name, job title, department).
                     int sigStart = firstMarker;
@@ -249,6 +256,114 @@ namespace JameelCopilot.Services
         public static string ToWord(string text)
         {
             return (text ?? "").Replace("\r\n", "\r").Replace('\n', '\r').Trim();
+        }
+
+        private static readonly Regex GreetingOrBodyStart = new Regex(
+            @"^[ \t]*(Hi\b|Hello\b|Dear\b|Good\s+(morning|afternoon|evening)\b|Greetings\b|Team[,:]|All[,:]|" +
+            @"السلام\s+عليكم|مرحبا|مرحباً|أهلا|أهلاً|تحية\s+طيبة|سعادة\b|الأستاذ|الأخ\b|الأخت\b|الإخوة|الزملاء)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex ConversationalWrapperLine = new Regex(
+            @"(:\s*$|^---\s*$|هذا\s+نص|إليك\s+نص|الرد\s+المقترح|ما\s+قدرت\s+أجد|لو\s+تبي\s+أعدل|إذا\s+تبي\s+أعدل|هل\s+ترغب\s+في\s+تعديل|let\s+me\s+know\s+if\s+you(\s+want|\s+would\s+like)|here\s+is\s+(the|a|your)\s+(draft|reply|email))",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// Cleans model-generated draft text before it is inserted into an
+        /// Outlook email editor: strips conversational chat wrappers (above/below
+        /// "---" or before the greeting), strips a leading "Subject:" line
+        /// (putting it into <paramref name="extractedSubject"/>), strips trailing
+        /// sign-offs ("Best regards,"), and removes raw Markdown bold/heading
+        /// markers (**text**) so Word receives clean plain text.
+        /// </summary>
+        public static string CleanDraftForEmail(string text, out string extractedSubject)
+        {
+            extractedSubject = null;
+            if (string.IsNullOrWhiteSpace(text)) return "";
+
+            var rawLines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            var lines = new System.Collections.Generic.List<string>(rawLines);
+
+            // 1. If the model fenced the email inside --- ... ---, extract the inner block.
+            int firstHr = -1, lastHr = -1;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (lines[i].Trim() == "---")
+                {
+                    if (firstHr < 0) firstHr = i;
+                    else lastHr = i;
+                }
+            }
+            if (firstHr >= 0 && lastHr > firstHr)
+            {
+                lines = lines.GetRange(firstHr + 1, lastHr - firstHr - 1);
+            }
+            else if (firstHr >= 0 && firstHr <= 3 && firstHr + 1 < lines.Count)
+            {
+                lines = lines.GetRange(firstHr + 1, lines.Count - (firstHr + 1));
+            }
+
+            while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[0])) lines.RemoveAt(0);
+            while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[lines.Count - 1])) lines.RemoveAt(lines.Count - 1);
+
+            // 2. If there is a conversational intro line (e.g. "... لكن هذا نص الإيميل:") followed by a greeting ("Hi ...", "Dear ..."), drop the intro.
+            if (lines.Count >= 2 && !GreetingOrBodyStart.IsMatch(lines[0]))
+            {
+                for (int i = 1; i <= System.Math.Min(3, lines.Count - 1); i++)
+                {
+                    if (GreetingOrBodyStart.IsMatch(lines[i]) && ConversationalWrapperLine.IsMatch(lines[0]))
+                    {
+                        lines.RemoveRange(0, i);
+                        break;
+                    }
+                }
+            }
+
+            // 3. Extract and strip a leading "Subject: ..." / "الموضوع: ..." line.
+            while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[0])) lines.RemoveAt(0);
+            if (lines.Count > 0)
+            {
+                var first = Regex.Replace(lines[0].Trim(), @"^\*\*|\*\*$", "").Trim();
+                var subjMatch = Regex.Match(first, @"^(Subject|الموضوع)\s*:\s*(.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (subjMatch.Success)
+                {
+                    extractedSubject = subjMatch.Groups[2].Value.Trim().Trim('*').Trim();
+                    lines.RemoveAt(0);
+                    while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[0])) lines.RemoveAt(0);
+                }
+            }
+
+            // 4. Drop trailing "---" and conversational offer lines ("لو تبي أعدل أي شي...") or trailing sign-offs ("Best regards,").
+            while (lines.Count > 0)
+            {
+                var last = lines[lines.Count - 1].Trim();
+                if (last.Length == 0 || last == "---" || ConversationalWrapperLine.IsMatch(last) || SignOffLine.IsMatch(last))
+                {
+                    lines.RemoveAt(lines.Count - 1);
+                    continue;
+                }
+                break;
+            }
+
+            // 5. Strip any remaining trailing signature + sign-off block.
+            var joined = StripSignatureAndFooter(string.Join("\n", lines));
+            var finalLines = new System.Collections.Generic.List<string>(joined.Replace("\r\n", "\n").Split('\n'));
+            while (finalLines.Count > 0 && (string.IsNullOrWhiteSpace(finalLines[finalLines.Count - 1]) || SignOffLine.IsMatch(finalLines[finalLines.Count - 1].Trim())))
+            {
+                finalLines.RemoveAt(finalLines.Count - 1);
+            }
+
+            // 6. Strip raw Markdown syntax (**bold**, ### headings) so Word editor gets clean plain text.
+            var sb = new StringBuilder();
+            for (int i = 0; i < finalLines.Count; i++)
+            {
+                var ln = finalLines[i];
+                ln = Regex.Replace(ln, @"^[ \t]*#{1,6}[ \t]+", "");
+                ln = Regex.Replace(ln, @"\*\*([^*\n]+)\*\*", "$1");
+                ln = Regex.Replace(ln, @"__([^_\n]+)__", "$1");
+                if (i > 0) sb.Append("\r\n");
+                sb.Append(ln);
+            }
+            return sb.ToString().Trim();
         }
     }
 }

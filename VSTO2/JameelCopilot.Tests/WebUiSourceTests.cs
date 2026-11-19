@@ -175,6 +175,7 @@ namespace JameelCopilot.Tests
 
             var surface = AddIn("Services", "Tools", "LiveOutlookSurface.cs");
             Assert.Contains("private Outlook.Explorer GetLiveExplorer()", surface);
+            Assert.DoesNotContain("System.Windows.Forms.Application.DoEvents()", surface);
         }
     }
 }

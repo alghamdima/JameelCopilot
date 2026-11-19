@@ -83,6 +83,8 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                     core.NewWindowRequested += (s, e) => { if (!e.Handled) popupsLeftUnhandled++; };
 
                     await NavigateAndWaitAsync(core);
+                    // Wait briefly if the initial 'ready' postMessage is still in flight under heavy parallel test CPU load.
+                    for (var w = 0; w < 10 && messageSources.Count == 0; w++) await Task.Delay(100);
 
                     await core.ExecuteScriptAsync(
                         "jameelcopilot.appendAssistantMessage('a1',''); jameelcopilot.appendTextDelta('a1', "
@@ -530,11 +532,36 @@ namespace JameelCopilot.Tests.TaskPane.Chat
   r.ruleStatus = texts('.msg-rule .draft-status')[0];
   r.ruleButtons = document.querySelectorAll('.msg-rule .draft-foot button').length;
 
-  // A meeting proposal names its room.
+  // A meeting proposal names its room and offers Copy times.
   o.appendToolCallCard('m1', 'jc_propose_meeting', '{}');
   o.updateToolCallCard('m1', true, '', JSON.stringify({ result_type: 'meeting_proposal', subject: 'Sync', attendees: ['sara@example.com'], room: 'Room 4',
     slots: [{ start: '2026-11-15T10:00', end: '2026-11-15T10:30' }], agenda: '' }));
   r.meetingWho = texts('.msg-meeting .meeting-who');
+  r.copyTimesBtn = document.querySelectorAll('.msg-meeting .meeting-pick-row button').length;
+
+  // Markdown inline code spans protect *, **, and [text](url) inside backticks.
+  r.inlineCodeHtml = window.markdown.render('Run `select * from [t](u) **raw**` now');
+
+  // @ colleague autocomplete filters hints and inserts Name <email>.
+  o.setPeopleHints([{ name: 'Sara Example', email: 'sara@example.com', meta: 'Team' }, { name: 'Khalid Example', email: 'khalid@example.com', meta: 'Manager' }]);
+  var inp = document.getElementById('composerInput');
+  inp.value = 'Ask @sar';
+  inp.selectionStart = inp.selectionEnd = inp.value.length;
+  inp.dispatchEvent(new Event('input'));
+  r.mentionVisible = !document.getElementById('mentionMenu').hidden;
+  inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  r.mentionInserted = inp.value;
+
+  // Learn my style populates the Memory draft cleanly as text.
+  o.setMemoryDraft(HOSTILE, 'Drafted from 12 sent emails');
+  r.styleDraft = document.getElementById('memoryInput').value;
+  r.styleStatus = document.getElementById('learnStyleStatus').textContent;
+
+  // Interactive Schedule Meeting setup card renders options as text and posts schedule_search.
+  o.showScheduleSetup({ subject: 'Hosting and Deployment', required: ['Atheel Alotaibi'], optional: ['Sameer Al Faifi'], preferred_building: 'HO1', period: 'this_week', duration: 60, location: 'HO1', message_id: 'm9' });
+  r.schedPills = texts('.msg-schedule-setup .sched-person-pill span');
+  document.querySelector('.msg-schedule-setup .draft-foot .btn-primary').click();
+
   r.pane = window.__pane || 0;
   return JSON.stringify(r);
 })()";
@@ -598,6 +625,13 @@ namespace JameelCopilot.Tests.TaskPane.Chat
             Assert.Equal(0, (int)page["ruleButtons"]);
 
             Assert.Equal(new[] { "With: sara@example.com", "Room: Room 4" }, page["meetingWho"].Select(t => (string)t));
+            Assert.Equal(1, (int)page["copyTimesBtn"]);
+            Assert.Contains("<code>select * from [t](u) **raw**</code>", (string)page["inlineCodeHtml"]);
+            Assert.True((bool)page["mentionVisible"]);
+            Assert.Equal("Ask Sara Example <sara@example.com> ", (string)page["mentionInserted"]);
+            Assert.Equal(hostile, (string)page["styleDraft"]);
+            Assert.Equal("Drafted from 12 sent emails", (string)page["styleStatus"]);
+            Assert.Equal(new[] { "Atheel Alotaibi", "Sameer Al Faifi" }, page["schedPills"].Select(t => (string)t));
             Assert.Equal(0, (int)page["pane"]);
 
             // Every click reaches the host as one message that names a card or a row, never its text.
@@ -611,13 +645,14 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 "{\"type\":\"task_add\",\"payload\":{\"id\":\"day1\",\"index\":1}}",
                 "{\"type\":\"followup\",\"payload\":{\"id\":\"s1\"}}",
                 "{\"type\":\"rule_create\",\"payload\":{\"call\":\"r1\"}}",
+                "{\"type\":\"schedule_search\",\"payload\":{\"subject\":\"Hosting and Deployment\",\"required\":[\"Atheel Alotaibi\"],\"optional\":[\"Sameer Al Faifi\"],\"period\":\"this_week\",\"custom_date\":" + JsonConvert.SerializeObject(DateTime.Now.ToString("yyyy-MM-dd")) + ",\"duration\":60,\"location\":\"HO1\",\"check_optional\":false,\"ignore_tentative\":true,\"message_id\":\"m9\"}}",
             };
             Assert.Equal(expected, messages.Where(m => m != null && !m.Contains("\"ready\"")).ToArray());
         }
 
         private static async Task NavigateAndWaitAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core)
         {
-            for (var attempt = 1; attempt <= 2; attempt++)
+            for (var attempt = 1; attempt <= 3; attempt++)
             {
                 var loaded = new TaskCompletionSource<bool>();
                 EventHandler<Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs> onNav = (s, e) => loaded.TrySetResult(e.IsSuccess);
@@ -625,9 +660,10 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                 try
                 {
                     core.Navigate("https://" + WebView2Bootstrap.VirtualHost + "/index.html");
-                    if (await Task.WhenAny(loaded.Task, Task.Delay(TimeSpan.FromSeconds(15))) == loaded.Task)
+                    if (await Task.WhenAny(loaded.Task, Task.Delay(TimeSpan.FromSeconds(25))) == loaded.Task)
                     {
                         if (await loaded.Task) return;
+                        await Task.Delay(250);
                         continue;
                     }
                 }
@@ -636,34 +672,45 @@ namespace JameelCopilot.Tests.TaskPane.Chat
                     core.NavigationCompleted -= onNav;
                 }
             }
-            throw new TimeoutException("WebView2 navigation did not answer within 30 s.");
+            throw new TimeoutException("WebView2 navigation did not answer within 60 s.");
         }
 
         // Runs the body on an STA thread with a message loop, in an off-screen window.
+        // Retries once with a fresh WebView2 user-data folder if Edge's background
+        // browser process exits transiently (HRESULT 0x8007139F) under heavy test load.
         private static void WithWebView(Func<WebView2, Task> body)
         {
-            Sta.Run(() =>
+            for (var attempt = 1; attempt <= 2; attempt++)
             {
                 Exception failure = null;
-                using (var form = new Form())
-                using (var web = new WebView2())
+                Sta.Run(() =>
                 {
-                    form.ShowInTaskbar = false;
-                    form.StartPosition = FormStartPosition.Manual;
-                    form.Location = new Point(-32000, -32000);
-                    form.Size = new Size(800, 600);
-                    web.Dock = DockStyle.Fill;
-                    form.Controls.Add(web);
-                    form.Load += async (sender, e) =>
+                    using (var form = new Form())
+                    using (var web = new WebView2())
                     {
-                        try { await body(web); }
-                        catch (Exception ex) { failure = ex; }
-                        finally { form.Close(); }
-                    };
-                    Application.Run(form);
+                        form.ShowInTaskbar = false;
+                        form.StartPosition = FormStartPosition.Manual;
+                        form.Location = new Point(-32000, -32000);
+                        form.Size = new Size(800, 600);
+                        web.Dock = DockStyle.Fill;
+                        form.Controls.Add(web);
+                        form.Load += async (sender, e) =>
+                        {
+                            try { await body(web); }
+                            catch (Exception ex) { failure = ex; }
+                            finally { form.Close(); }
+                        };
+                        Application.Run(form);
+                    }
+                });
+                if (failure == null) return;
+                if (attempt == 1 && (failure is InvalidOperationException || failure is TimeoutException))
+                {
+                    System.Threading.Thread.Sleep(500);
+                    continue;
                 }
-                if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
-            });
+                ExceptionDispatchInfo.Capture(failure).Throw();
+            }
         }
 
         private static async Task Within(Task task, int seconds)

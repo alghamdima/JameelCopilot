@@ -113,6 +113,15 @@ namespace JameelCopilot.Services
                         }
                     }
                 }
+                if (context.UseTools && !context.Structured && round >= 6 && messages.Count > 2)
+                {
+                    var sysWrap = messages[0] as JObject;
+                    if (sysWrap != null && (string)sysWrap["role"] == "system")
+                    {
+                        sysWrap["content"] = ((string)sysWrap["content"] ?? "")
+                            + "\n\nCRITICAL TOOL BUDGET NOTICE: You have already executed multiple search/read rounds. Do NOT run further broad mailbox searches; synthesize and write your complete final answer for the user now based on the evidence already gathered (call outlook_read_messages at most once if you have unread IDs, otherwise reply immediately).";
+                    }
+                }
                 var body = ChatCompletionsWire.BuildRequest(
                     Config.Model,
                     messages,

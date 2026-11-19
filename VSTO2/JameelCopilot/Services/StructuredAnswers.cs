@@ -45,6 +45,39 @@ namespace JameelCopilot.Services
             }
             catch (JsonException)
             {
+                // Stray braces in preamble/trailing text: try every balanced '{'...' }' span.
+                for (int i = start; i >= 0 && i < text.Length; i = text.IndexOf('{', i + 1))
+                {
+                    int depth = 0;
+                    bool inStr = false, esc = false;
+                    for (int j = i; j < text.Length; j++)
+                    {
+                        char c = text[j];
+                        if (inStr)
+                        {
+                            if (esc) esc = false;
+                            else if (c == '\\') esc = true;
+                            else if (c == '"') inStr = false;
+                            continue;
+                        }
+                        if (c == '"') inStr = true;
+                        else if (c == '{') depth++;
+                        else if (c == '}')
+                        {
+                            depth--;
+                            if (depth == 0)
+                            {
+                                try
+                                {
+                                    var parsed = StoredJson.Parse(text.Substring(i, j - i + 1));
+                                    if (parsed != null) return parsed;
+                                }
+                                catch (JsonException) { }
+                                break;
+                            }
+                        }
+                    }
+                }
                 return null;
             }
         }
@@ -59,7 +92,7 @@ namespace JameelCopilot.Services
                 (string)m?["type"] == "message" && (string)m?["role"] == "user" && m["content"]?.Type == JTokenType.String
                 && m[ChipLineMark] == null);
             if (lastUser == null) return whenNothingSaid;
-            return ((string)lastUser["content"]).Any(c => c >= '\u0600' && c <= '\u06FF') ? "Arabic" : "English";
+            return CustomApiChatService.DetectPromptLanguage((string)lastUser["content"]) ?? "English";
         }
 
         /// <summary>

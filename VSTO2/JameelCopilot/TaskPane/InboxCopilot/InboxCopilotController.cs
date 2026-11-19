@@ -239,6 +239,12 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     case "draft_action":
                         HandleDraftAction((string)payload?["id"], (string)payload?["action"]);
                         break;
+                    case "learn_style":
+                        _ = RunLearnStyleAsync();
+                        break;
+                    case "schedule_search":
+                        _ = RunScheduleSearchFromCardAsync(payload);
+                        break;
                     case "copy":
                         var clip = (string)payload?["text"] ?? _store.LatestAssistantText() ?? _store.ExportForClipboard();
                         try { Clipboard.SetText(clip ?? ""); } catch { }
@@ -317,12 +323,54 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                 {
                     var newMeetingChip = new JObject(
                         new JProperty("label", "+ New meeting"),
-                        new JProperty("mode", "fill"),
-                        new JProperty("prompt", "Schedule a 1-hour meeting with [names] about [topic] via [HO1 room / Microsoft Teams]."));
+                        new JProperty("mode", "action"),
+                        new JProperty("id", "schedule_setup"));
                     mChips.Insert(Math.Min(1, mChips.Count), newMeetingChip);
+                }
+                else if (effectiveSelCount == 1 && hasSelection && chips.Count > 0 && chips[0] is JObject emailGroup && emailGroup["chips"] is JArray eChips)
+                {
+                    foreach (var ch in eChips.OfType<JObject>())
+                    {
+                        if ((string)ch["label"] == "Schedule a meeting")
+                        {
+                            ch["mode"] = "action";
+                            ch["id"] = "schedule_setup";
+                            ch.Remove("prompt");
+                        }
+                    }
+                    var firstMsg = sel.Messages[0];
+                    if (firstMsg.Attachments != null && firstMsg.Attachments.Count > 0)
+                    {
+                        eChips.Insert(Math.Min(2, eChips.Count), new JObject(
+                            new JProperty("label", "Summarize attachment"),
+                            new JProperty("mode", "send"),
+                            new JProperty("prompt", "Summarize the attached file(s) on the selected email concisely, highlighting key figures, decisions, and action items.")));
+                    }
+                    eChips.Insert(Math.Min(1, eChips.Count), new JObject(
+                        new JProperty("label", "\u2713 Approve"),
+                        new JProperty("mode", "action"),
+                        new JProperty("id", "reply_approve")));
+                    eChips.Insert(Math.Min(2, eChips.Count), new JObject(
+                        new JProperty("label", "? Clarify"),
+                        new JProperty("mode", "action"),
+                        new JProperty("id", "reply_clarify")));
+                    eChips.Insert(Math.Min(3, eChips.Count), new JObject(
+                        new JProperty("label", "Polite decline"),
+                        new JProperty("mode", "action"),
+                        new JProperty("id", "reply_decline")));
                 }
                 chips.Add(_chats.PromptsGroup());
                 _ = RunScript("jameelcopilot.setQuickActions(" + chips.ToString(Newtonsoft.Json.Formatting.None) + ");");
+
+                var extraAddrs = new List<string>();
+                if (hasSelection && !_mailboxOnlyMode)
+                {
+                    var firstMsg = sel.Messages[0];
+                    if (!string.IsNullOrEmpty(firstMsg.From)) extraAddrs.Add(firstMsg.From);
+                    if (firstMsg.To != null) extraAddrs.AddRange(firstMsg.To);
+                    if (firstMsg.Cc != null) extraAddrs.AddRange(firstMsg.Cc);
+                }
+                _ = PushPeopleHintsAsync(extraAddrs);
             }
             catch (Exception ex)
             {
@@ -330,7 +378,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             }
         }
 
-        private async Task StartTurnAsync(string userText)
+        private async Task StartTurnAsync(string userText, string displayOverride = null)
         {
             TraceLog.Write(">> StartTurnAsync inFlight=" + _turnInFlight + " ready=" + _isReady, "InboxCopilot");
             if (_turnInFlight || string.IsNullOrWhiteSpace(userText) || !_isReady)
@@ -343,10 +391,23 @@ namespace JameelCopilot.TaskPane.InboxCopilot
 
             var isTranslateChip = userText.StartsWith("Translate the main message body of the selected email", StringComparison.Ordinal);
             var isSummarizeChip = userText.StartsWith("Summarize the selected message and the rest of its conversation thread.", StringComparison.Ordinal);
+            var isAttachmentChip = userText.StartsWith("Summarize the attached file(s) on the selected email", StringComparison.Ordinal);
             var isScheduleChip = userText.StartsWith("Help me schedule a meeting about the selected email", StringComparison.Ordinal);
-            var shownUserText = isTranslateChip ? "Translate the selected email."
+            if (isScheduleChip)
+            {
+                _turnInFlight = false;
+                _activeCts?.Dispose();
+                _activeCts = null;
+                _ = ShowScheduleSetupCardAsync();
+                return;
+            }
+            var isPrepMeetingChip = userText.StartsWith("Find my next upcoming meeting in my calendar today or tomorrow.", StringComparison.Ordinal);
+            var shownUserText = !string.IsNullOrEmpty(displayOverride) ? displayOverride
+                : isTranslateChip ? "Translate the selected email."
                 : isSummarizeChip ? "Summarize this email."
+                : isAttachmentChip ? "Summarize the attachment(s)."
                 : isScheduleChip ? "Schedule a meeting for this email."
+                : isPrepMeetingChip ? "Prepare for my next meeting."
                 : userText;
             await RunScript("jameelcopilot.appendUserMessage(" + JsString(shownUserText) + ");");
             await RunScript("jameelcopilot.setComposerEnabled(false, true);");
@@ -356,7 +417,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             try
             {
                 var initialSnapshot = _store.Snapshot();
-                MessageDetail fastMsg = (isTranslateChip || isSummarizeChip)
+                MessageDetail fastMsg = (isTranslateChip || isSummarizeChip || isAttachmentChip)
                     ? await Task.Run(() => _surface?.GetCurrentSelection(includeFullBodies: true, maxItems: 1)?.Messages?.FirstOrDefault(), _activeCts.Token)
                     : null;
 
@@ -378,10 +439,10 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     {
                         _store.Append(ChipLine("Translate the selected message."));
                         _store.Append(HistoryMessage("assistant", result.FinalAssistantText));
-                        _ = Task.Run(() => _chats.Save());
+                        _chats.Save();
                     }
                 }
-                else if (isSummarizeChip && fastMsg != null)
+                else if ((isSummarizeChip || isAttachmentChip) && fastMsg != null)
                 {
                     var language = StructuredAnswers.ReplyLanguage(initialSnapshot, "the language of the email");
                     var attSb = new System.Text.StringBuilder();
@@ -401,17 +462,19 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     var ctx = new ConversationContext
                     {
                         UseTools = false,
-                        SystemInstructions = "Summarize the email (including its quoted conversation thread and any extracted attachment content) concisely in " + language + ". Highlight: (1) Key points, (2) Decisions or status, (3) Action items / asks. Use clean bullet points. Do not search other unrelated emails.",
+                        SystemInstructions = isAttachmentChip
+                            ? "Summarize the attached file(s) of this email concisely in " + language + ". Highlight: (1) Document purpose & key figures/facts, (2) Main conclusions or terms, (3) Action items or asks for the reader. If an attachment's text could not be extracted, note its filename cleanly."
+                            : "Summarize the email (including its quoted conversation thread and any extracted attachment content) concisely in " + language + ". Highlight: (1) Key points, (2) Decisions or status, (3) Action items / asks. Use clean bullet points. Do not search other unrelated emails.",
                         Context = emailData,
                         Temperature = _prefs.Temperature,
-                        Memory = await Task.Run(() => _chats.Memory, _activeCts.Token),
+                        Memory = _chats.Memory,
                     };
-                    result = await _chat.RunTurnAsync(ctx, "Summarize this email.", _toolHost, sink, _activeCts.Token);
+                    result = await _chat.RunTurnAsync(ctx, isAttachmentChip ? "Summarize the attachment(s)." : "Summarize this email.", _toolHost, sink, _activeCts.Token);
                     if (result.StopReason != StopReason.Error && !string.IsNullOrEmpty(result.FinalAssistantText))
                     {
-                        _store.Append(ChipLine("Summarize the selected message."));
+                        _store.Append(ChipLine(isAttachmentChip ? "Summarize the attachment(s)." : "Summarize the selected message."));
                         _store.Append(HistoryMessage("assistant", result.FinalAssistantText));
-                        _ = Task.Run(() => _chats.Save());
+                        _chats.Save();
                     }
                 }
                 else
@@ -426,10 +489,26 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     History = new System.Collections.Generic.List<JObject>(initialSnapshot),
                     IncludeWriteTools = Config.WriteToolsEnabled,
                     Temperature = _prefs.Temperature,
-                    Memory = await Task.Run(() => _chats.Memory, _activeCts.Token),
+                    Memory = _chats.Memory,
                 };
 
                 result = await _chat.RunTurnAsync(ctx, userText, _toolHost, sink, _activeCts.Token);
+                if (result.StopReason == StopReason.MaxRoundsReached && string.IsNullOrWhiteSpace(result.FinalAssistantText))
+                {
+                    // Never leave an empty bubble showing only "Emails used (50)" when the model hit MaxToolRounds:
+                    // make one final tool-free synthesis call over the gathered evidence!
+                    ctx.UseTools = false;
+                    var synth = await _chat.RunTurnAsync(
+                        ctx,
+                        "Using the messages and calendar items already found above, write the complete, concise answer to my original request now (in the language of my original message).",
+                        _toolHost,
+                        sink,
+                        _activeCts.Token);
+                    if (!string.IsNullOrWhiteSpace(synth.FinalAssistantText))
+                    {
+                        result = synth;
+                    }
+                }
 
                 if (result.StopReason != StopReason.Error)
                 {
@@ -437,21 +516,26 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     {
                         _store.Append(ctx.History[i]);
                     }
-                    _ = Task.Run(() => _chats.Save());
+                    _chats.Save();
                 }
                 }
                 var finalText = (result.FinalAssistantText ?? "").Trim();
-                if (result.StopReason == StopReason.Completed && finalText.Length > 0 && !_mailboxOnlyMode)
+                var canReply = false;
+                if (result.StopReason == StopReason.Completed && finalText.Length > 0 && !_mailboxOnlyMode
+                    && !isSummarizeChip && !isAttachmentChip && !isScheduleChip && !isPrepMeetingChip
+                    && IsDraftLikeAnswer(userText, finalText, isTranslateChip))
                 {
                     var selMsg = await Task.Run(() => _surface?.GetCurrentSelection(includeFullBodies: false, maxItems: 1)?.Messages?.FirstOrDefault());
                     if (selMsg != null && !string.IsNullOrEmpty(selMsg.Id))
                     {
                         _drafts[assistantId] = new ReplyDraft { Message = selMsg, Text = finalText, FollowUp = false };
+                        canReply = true;
                     }
                 }
                 var opts = new JObject(
                     new JProperty("stopped", result.StopReason == StopReason.Cancelled),
-                    new JProperty("error", result.StopReason == StopReason.Error));
+                    new JProperty("error", result.StopReason == StopReason.Error),
+                    new JProperty("can_reply", canReply));
                 await RunScript("jameelcopilot.finalizeAssistantMessage(" + JsString(assistantId) + ", " +
                                 opts.ToString(Newtonsoft.Json.Formatting.None) + ");");
             }
@@ -484,6 +568,10 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             switch (chipId)
             {
                 case QuickActionChip.ReplyChipId: _ = RunReplyDraftAsync(null); break;
+                case "reply_approve": _ = RunReplyDraftAsync(null, followUp: false, replyIntent: "approve"); break;
+                case "reply_clarify": _ = RunReplyDraftAsync(null, followUp: false, replyIntent: "clarify"); break;
+                case "reply_decline": _ = RunReplyDraftAsync(null, followUp: false, replyIntent: "decline"); break;
+                case "schedule_setup": _ = ShowScheduleSetupCardAsync(); break;
                 case QuickActionChip.PrioritizeChipId: _ = RunPrioritizeAsync(); break;
                 case QuickActionChip.TidyChipId: _ = RunTidyAsync(); break;
                 case QuickActionChip.DayChipId: _ = RunDayAsync(); break;
@@ -888,6 +976,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             public MessageDetail Message;
             public string Text;
             public bool FollowUp;   // to the user's own sent email, which nobody answered
+            public string Intent;
         }
 
         /// <summary>
@@ -895,7 +984,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
         /// a card was written for) and shows it as a draft card. Nothing is
         /// created in Outlook until the user presses Open reply.
         /// </summary>
-        private async Task RunReplyDraftAsync(MessageDetail message, bool followUp = false)
+        private async Task RunReplyDraftAsync(MessageDetail message, bool followUp = false, string replyIntent = null)
         {
             if (_turnInFlight || !_isReady || _surface == null) return;
             if (message == null)
@@ -911,8 +1000,13 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             _turnInFlight = true;
             _activeCts = new CancellationTokenSource();
             var id = "draft_" + (++_nextMessageId);
+            var draftTitle = followUp ? "Follow-up draft"
+                : replyIntent == "approve" ? "Approval reply draft"
+                : replyIntent == "clarify" ? "Clarification reply draft"
+                : replyIntent == "decline" ? "Polite decline draft"
+                : "Reply draft";
             await RunScript("jameelcopilot.setComposerEnabled(false, true);");
-            await RunScript("jameelcopilot.beginDraft(" + JsString(id) + ", " + JsString(followUp ? "Follow-up draft" : "Reply draft") + ");");
+            await RunScript("jameelcopilot.beginDraft(" + JsString(id) + ", " + JsString(draftTitle) + ");");
 
             try
             {
@@ -922,10 +1016,10 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                 await Task.Run(() => _surface.GetOwner(out ownerName, out ownerEmail), _activeCts.Token);
                 var compose = followUp ? ComposePrompt.FollowUpTo(message, ownerName, ownerEmail) : ComposePrompt.ReplyTo(message, ownerName, ownerEmail);
                 var ctx = CustomApiChatService.NewActionContext(action);
-                ctx.SystemInstructions = followUp ? ComposePrompt.FollowUpInstructions : ComposePrompt.Instructions(action, compose);
+                ctx.SystemInstructions = followUp ? ComposePrompt.FollowUpInstructions : ComposePrompt.Instructions(action, compose, replyIntent);
                 ctx.Context = ComposePrompt.Context(compose, includeDraft: false, ownEarlier: followUp);
                 ctx.Temperature = _prefs.Temperature;
-                ctx.Memory = await Task.Run(() => _chats.Memory, _activeCts.Token);
+                ctx.Memory = _chats.Memory;
                 var userMessage = followUp ? ComposePrompt.FollowUpRequest : ComposePrompt.UserMessage(action, compose, "");
 
                 var result = await _chat.RunTurnAsync(ctx, userMessage, _toolHost, new WebViewSink(this, id), _activeCts.Token);
@@ -937,10 +1031,10 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     return;
                 }
 
-                _drafts[id] = new ReplyDraft { Message = message, Text = text, FollowUp = followUp };
+                _drafts[id] = new ReplyDraft { Message = message, Text = text, FollowUp = followUp, Intent = replyIntent };
                 _store.Append(ChipLine(followUp ? "Draft a follow-up to my unanswered email." : "Draft a reply to the selected email."));
                 _store.Append(HistoryMessage("assistant", text));
-                _ = Task.Run(() => _chats.Save());
+                _chats.Save();
                 await RunScript(ComposeChips.FinalizeScript(id, followUp ? ComposeChips.FollowUpButtons() : ComposeChips.ReplyWindowButtons(), "not in an email yet",
                     "Text in [brackets] is for you to fill in. No signature is written: Outlook adds yours.", false));
             }
@@ -996,7 +1090,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                     _ = RunScript(ComposeChips.MarkScript(id, opened, "opened in a reply window", "could not open the reply; copy the text instead"));
                     break;
                 case "regenerate":
-                    _ = RunReplyDraftAsync(draft.Message, draft.FollowUp);
+                    _ = RunReplyDraftAsync(draft.Message, draft.FollowUp, draft.Intent);
                     break;
                 case "discard":
                     _drafts.Remove(id);
@@ -1072,19 +1166,31 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             {
                 if (callId != null && _meetings.TryGetValue(callId, out var proposal) && _surface != null)
                 {
+                    var chosenRoom = proposal.Room;
                     if (roomIndex >= 0 && proposal.RoomOptions != null && roomIndex < proposal.RoomOptions.Count)
                     {
-                        proposal = new MeetingProposal
+                        var opt = proposal.RoomOptions[roomIndex];
+                        chosenRoom = opt.Value;
+                        // If the selected room is booked on this specific slot, automatically fall back to a room verified free on this slot!
+                        if (opt.FreeSlots != null && opt.FreeSlots.Count > 0 && !opt.FreeSlots.Contains(slot))
                         {
-                            Subject = proposal.Subject,
-                            Attendees = proposal.Attendees,
-                            OptionalAttendees = proposal.OptionalAttendees,
-                            Slots = proposal.Slots,
-                            Agenda = proposal.Agenda,
-                            Room = proposal.RoomOptions[roomIndex].Value,
-                            RoomOptions = proposal.RoomOptions,
-                        };
+                            var slotFree = (proposal.SlotFreeRoomValues != null && slot >= 0 && slot < proposal.SlotFreeRoomValues.Count)
+                                ? proposal.SlotFreeRoomValues[slot]?.FirstOrDefault()
+                                : null;
+                            chosenRoom = !string.IsNullOrEmpty(slotFree) ? slotFree : "Microsoft Teams Meeting";
+                        }
                     }
+                    proposal = new MeetingProposal
+                    {
+                        Subject = proposal.Subject,
+                        Attendees = proposal.Attendees,
+                        OptionalAttendees = proposal.OptionalAttendees,
+                        Slots = proposal.Slots,
+                        Agenda = proposal.Agenda,
+                        Room = chosenRoom,
+                        RoomOptions = proposal.RoomOptions,
+                        SlotFreeRoomValues = proposal.SlotFreeRoomValues,
+                    };
                     opened = _surface.OpenMeetingRequest(proposal, slot);
                 }
             }
@@ -1114,6 +1220,188 @@ namespace JameelCopilot.TaskPane.InboxCopilot
             {
                 _ = RunScript("jameelcopilot.appendAuditRow(" + JsString("That email could not be opened. It may have been moved or deleted.") + ");");
             }
+        }
+
+        internal static bool IsDraftLikeAnswer(string userText, string finalText, bool isTranslateChip)
+        {
+            if (isTranslateChip) return true;
+            if (string.IsNullOrWhiteSpace(finalText)) return false;
+            // Markdown headings or GFM tables indicate an analysis/report/agenda, not email body text.
+            if (finalText.Contains("\n|---") || finalText.Contains("\n| ---") || finalText.StartsWith("#", StringComparison.Ordinal) || finalText.Contains("\n### "))
+            {
+                return false;
+            }
+            var q = (userText ?? "").ToLowerInvariant();
+            return q.Contains("reply") || q.Contains("draft") || q.Contains("write") || q.Contains("respond")
+                || q.Contains("translate") || q.Contains("email") || q.Contains("answer")
+                || q.Contains("\u0631\u062F") || q.Contains("\u0627\u0643\u062A\u0628") || q.Contains("\u0635\u064A\u0627\u063A")
+                || q.Contains("\u0631\u0633\u0627\u0644") || q.Contains("\u0627\u064A\u0645\u064A\u0644") || q.Contains("\u0625\u064A\u0645\u064A\u0644")
+                || q.Contains("\u062A\u0631\u062C\u0645");
+        }
+
+        private async Task PushPeopleHintsAsync(IReadOnlyList<string> extraAddresses)
+        {
+            if (_isDisposed || !_isReady || _surface == null) return;
+            try
+            {
+                var org = await Task.Run(() => (_surface as IOrgSurface)?.GetOrgContext());
+                var hints = InboxCopilotPromptBuilder.BuildPeopleHints(org, extraAddresses);
+                await RunScript("jameelcopilot.setPeopleHints(" + hints.ToString(Newtonsoft.Json.Formatting.None) + ");");
+            }
+            catch (Exception ex)
+            {
+                TraceLog.Write("PushPeopleHintsAsync error: " + ex.GetType().Name, "InboxCopilot");
+            }
+        }
+
+        private async Task RunLearnStyleAsync()
+        {
+            if (_isDisposed || !_isReady || _surface == null || _turnInFlight)
+            {
+                await RunScript("jameelcopilot.setMemoryDraft('', 'Finish the active request first.');");
+                return;
+            }
+            try
+            {
+                var samples = await Task.Run(() => _surface.SampleSentEmails(12));
+                if (samples == null || samples.Count == 0)
+                {
+                    await RunScript("jameelcopilot.setMemoryDraft('', 'No sent emails found to analyze yet.');");
+                    return;
+                }
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < samples.Count; i++)
+                {
+                    sb.Append("--- Sent sample ").Append(i + 1).Append(" ---\n").Append(samples[i]).Append("\n\n");
+                }
+                var ctx = CustomApiChatService.NewActionContext(CustomApiChatService.ActionType.Custom);
+                ctx.SystemInstructions = ComposePrompt.LearnStyleInstructions;
+                ctx.Context = sb.ToString();
+                ctx.Temperature = _prefs.Temperature;
+                var result = await _chat.RunTurnAsync(ctx, "Summarize my personal email writing style as one memory note.", _toolHost, new QuietSink(), CancellationToken.None);
+                var note = UserMemoryService.Clean(result.FinalAssistantText);
+                if (result.StopReason != StopReason.Completed || string.IsNullOrEmpty(note))
+                {
+                    await RunScript("jameelcopilot.setMemoryDraft('', 'Could not analyze style right now. Try again.');");
+                    return;
+                }
+                await RunScript("jameelcopilot.setMemoryDraft(" + JsString(note) + ", " +
+                    JsString("Drafted from " + samples.Count + " sent emails - review & press Remember.") + ");");
+            }
+            catch (Exception ex)
+            {
+                TraceLog.Write("RunLearnStyleAsync failed: " + ex.GetType().Name, "InboxCopilot");
+                await RunScript("jameelcopilot.setMemoryDraft('', 'Could not analyze style right now.');");
+            }
+        }
+
+        private async Task ShowScheduleSetupCardAsync()
+        {
+            if (_isDisposed || !_isReady || _surface == null || _turnInFlight) return;
+            try
+            {
+                string ownerName = "", ownerEmail = "";
+                MessageDetail selMsg = null;
+                OrgContextInfo org = null;
+                await Task.Run(() =>
+                {
+                    _surface.GetOwner(out ownerName, out ownerEmail);
+                    if (!_mailboxOnlyMode)
+                    {
+                        selMsg = _surface.GetCurrentSelection(includeFullBodies: false, maxItems: 1)?.Messages?.FirstOrDefault();
+                    }
+                    org = (_surface as IOrgSurface)?.GetOrgContext();
+                });
+
+                bool IsSelf(string raw)
+                {
+                    var s = (raw ?? "").Trim();
+                    if (s.Length == 0) return true;
+                    if (!string.IsNullOrEmpty(ownerEmail) && s.IndexOf(ownerEmail, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                    if (!string.IsNullOrEmpty(ownerName) && string.Equals(s, ownerName, StringComparison.OrdinalIgnoreCase)) return true;
+                    return false;
+                }
+
+                var req = new List<string>();
+                var opt = new List<string>();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (selMsg != null)
+                {
+                    if (!IsSelf(selMsg.From) && seen.Add(selMsg.From.Trim())) req.Add(selMsg.From.Trim());
+                    foreach (var t in selMsg.To ?? new string[0])
+                    {
+                        if (!IsSelf(t) && seen.Add(t.Trim())) req.Add(t.Trim());
+                    }
+                    foreach (var c in selMsg.Cc ?? new string[0])
+                    {
+                        if (!IsSelf(c) && seen.Add(c.Trim())) opt.Add(c.Trim());
+                    }
+                }
+
+                var rawSubj = (selMsg?.Subject ?? "").Trim();
+                while (rawSubj.StartsWith("RE:", StringComparison.OrdinalIgnoreCase)
+                    || rawSubj.StartsWith("FW:", StringComparison.OrdinalIgnoreCase)
+                    || rawSubj.StartsWith("FWD:", StringComparison.OrdinalIgnoreCase)
+                    || rawSubj.StartsWith("\u0631\u062F:", StringComparison.Ordinal))
+                {
+                    int colon = rawSubj.IndexOf(':');
+                    rawSubj = colon >= 0 ? rawSubj.Substring(colon + 1).TrimStart() : rawSubj;
+                }
+
+                var prefBld = !string.IsNullOrEmpty(org?.PreferredBuilding) ? org.PreferredBuilding : "HO1";
+                var cardData = new JObject(
+                    new JProperty("subject", rawSubj.Length > 0 ? rawSubj : "Project Sync"),
+                    new JProperty("required", new JArray(req.Cast<object>())),
+                    new JProperty("optional", new JArray(opt.Cast<object>())),
+                    new JProperty("preferred_building", prefBld),
+                    new JProperty("period", "this_week"),
+                    new JProperty("duration", 60),
+                    new JProperty("location", prefBld),
+                    new JProperty("message_id", selMsg?.Id ?? ""));
+                await RunScript("jameelcopilot.showScheduleSetup(" + cardData.ToString(Newtonsoft.Json.Formatting.None) + ");");
+            }
+            catch (Exception ex)
+            {
+                TraceLog.Write("ShowScheduleSetupCardAsync error: " + ex.GetType().Name, "InboxCopilot");
+            }
+        }
+
+        private async Task RunScheduleSearchFromCardAsync(JObject payload)
+        {
+            if (_isDisposed || !_isReady || _surface == null || _turnInFlight || payload == null) return;
+            var subject = StructuredAnswers.OneLine((string)payload["subject"] ?? "Meeting");
+            var req = (payload["required"] as JArray ?? new JArray()).Where(t => t.Type == JTokenType.String).Select(t => ((string)t).Trim()).Where(s => s.Length > 0).ToList();
+            var opt = (payload["optional"] as JArray ?? new JArray()).Where(t => t.Type == JTokenType.String).Select(t => ((string)t).Trim()).Where(s => s.Length > 0).ToList();
+            if (req.Count == 0 && opt.Count == 0)
+            {
+                await RunScript("jameelcopilot.appendAuditRow('Add at least one attendee to check calendar availability.');");
+                return;
+            }
+            var period = (string)payload["period"] ?? "this_week";
+            var customDate = (string)payload["custom_date"] ?? "";
+            var duration = payload["duration"]?.Type == JTokenType.Integer ? (int)payload["duration"] : 60;
+            var location = (string)payload["location"] ?? "HO1";
+            var checkOpt = payload["check_optional"]?.Type == JTokenType.Boolean && (bool)payload["check_optional"];
+            var ignoreTent = payload["ignore_tentative"] == null || (payload["ignore_tentative"].Type == JTokenType.Boolean && (bool)payload["ignore_tentative"]);
+
+            MeetingTimes.ResolvePeriodRange(period, customDate, DateTime.Now, out var fromDt, out var toDt);
+            var dateFromIso = CalendarArgs.Local(fromDt);
+            var dateToIso = CalendarArgs.Local(toDt);
+            var bldParam = (location == "HO1" || location == "HO2") ? (", required_room_building=\"" + location + "\"") : "";
+            var optText = opt.Count > 0
+                ? (" Optional (CC): " + string.Join(", ", opt) + " (check_optional_availability=" + (checkOpt ? "true" : "false") + ").")
+                : " No optional attendees.";
+            var prompt = "Schedule meeting \"" + subject + "\" for " + duration + " minutes between " + dateFromIso + " and " + dateToIso + ". " +
+                         "Required attendees: " + string.Join(", ", req) + "." + optText + " " +
+                         "Location preference: " + (location == "Teams" ? "Microsoft Teams Meeting" : ("verified free room in " + location)) + ". " +
+                         "All scheduling options are already confirmed by the user - do NOT ask any follow-up questions: " +
+                         "immediately call outlook_resolve_people, then call outlook_find_meeting_times with duration_minutes=" + duration +
+                         ", date_from=\"" + dateFromIso + "\", date_to=\"" + dateToIso + "\", check_optional_availability=" + (checkOpt ? "true" : "false") +
+                         ", ignore_tentative=" + (ignoreTent ? "true" : "false") + bldParam +
+                         ", and then call jc_propose_meeting with only verified free rooms for the chosen slots (or \"Microsoft Teams Meeting\") and a structured agenda (Goal / Key points / Decisions needed).";
+            var periodLabel = period == "today" ? "Today" : period == "next_week" ? "Next week" : period == "custom" ? customDate : "This week";
+            var displaySummary = "Schedule \"" + subject + "\" (" + duration + " min, " + periodLabel + ", " + (location == "Teams" ? "Microsoft Teams" : (location + " Room")) + ")";
+            await StartTurnAsync(prompt, displaySummary);
         }
 
         private static string JsString(string s)

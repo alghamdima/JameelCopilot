@@ -56,6 +56,9 @@
   var $chatList = document.getElementById('chatList');
   var $memoryList = document.getElementById('memoryList');
   var $memoryInput = document.getElementById('memoryInput');
+  var $btnLearnStyle = document.getElementById('btnLearnStyle');
+  var $learnStyleStatus = document.getElementById('learnStyleStatus');
+  var $mentionMenu = document.getElementById('mentionMenu');
   var $viewPrompts = document.getElementById('viewPrompts');
   var $promptList = document.getElementById('promptList');
   var $promptInput = document.getElementById('promptInput');
@@ -485,12 +488,25 @@
       body.appendChild(room);
     }
     if (typeof p.agenda === 'string' && p.agenda) {
-      var agenda = elt('div', 'meeting-agenda', p.agenda);
+      var agenda = elt('div', 'meeting-agenda', p.agenda.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n'));
       agenda.dir = 'auto';
       body.appendChild(agenda);
     }
-    body.appendChild(elt('div', 'meeting-pick', 'Pick a time to open the meeting request:'));
+    var pickRow = elt('div', 'meeting-pick-row');
+    pickRow.appendChild(elt('div', 'meeting-pick', 'Pick a time to open the meeting request:'));
+    var copyTimes = button('btn btn-small btn-ghost', 'Copy times');
+    copyTimes.title = 'Copy proposed times as text to share in a reply';
+    copyTimes.addEventListener('click', function() {
+      var lines = ['Available times' + (p.subject ? ' for ' + p.subject : '') + ':'];
+      p.slots.forEach(function(slot) { lines.push('- ' + slotLabel(slot)); });
+      postToHost({ type: 'copy', payload: { text: lines.join('\n') } });
+      copyTimes.textContent = 'Copied';
+      setTimeout(function() { copyTimes.textContent = 'Copy times'; }, 1500);
+    });
+    pickRow.appendChild(copyTimes);
+    body.appendChild(pickRow);
     var foot = elt('div', 'draft-foot');
+    var slotButtons = [];
     p.slots.forEach(function(slot, i) {
       var b = button('btn btn-small' + (i === 0 ? ' btn-primary' : ''), slotLabel(slot));
       b.addEventListener('click', function() {
@@ -499,8 +515,30 @@
         postToHost({ type: 'meeting_open', payload: payload });
         status.textContent = 'opened in Outlook - send it from there';
       });
+      slotButtons.push(b);
       foot.appendChild(b);
     });
+    if (roomSelect && Array.isArray(p.room_options)) {
+      var syncRoomSlots = function() {
+        var rIdx = parseInt(roomSelect.value, 10);
+        var opt = p.room_options[rIdx];
+        var allowed = opt && Array.isArray(opt.free_slots) ? opt.free_slots : null;
+        slotButtons.forEach(function(btn, idx) {
+          var slot = p.slots[idx] || {};
+          var baseText = slotLabel(slot);
+          if (allowed && allowed.indexOf(idx) < 0) {
+            var altRooms = Array.isArray(slot.free_rooms) && slot.free_rooms.length ? slot.free_rooms[0].name : 'Teams';
+            btn.title = 'Selected room is booked at this time; ' + altRooms + ' will be used instead';
+            btn.textContent = baseText + ' (' + altRooms + ')';
+          } else {
+            btn.title = '';
+            btn.textContent = baseText;
+          }
+        });
+      };
+      roomSelect.addEventListener('change', syncRoomSlots);
+      syncRoomSlots();
+    }
     node.appendChild(head);
     node.appendChild(body);
     node.appendChild(foot);
@@ -705,7 +743,13 @@
     }
   }
 
-  function scrollToBottom() {
+  function isNearBottom() {
+    if (!$messages) return true;
+    return ($messages.scrollHeight - $messages.scrollTop - $messages.clientHeight) < 88;
+  }
+
+  function scrollToBottom(force) {
+    if (!force && !isNearBottom()) return;
     $messages.scrollTop = $messages.scrollHeight;
   }
 
@@ -792,7 +836,7 @@
       content.innerHTML = renderMarkdown(text);
       node.appendChild(content);
       $messages.appendChild(node);
-      scrollToBottom();
+      scrollToBottom(true);
     },
 
     appendAssistantMessage: function(id, initialText) {
@@ -814,7 +858,7 @@
         complete: false,
         exportButton: exportButton
       };
-      scrollToBottom();
+      scrollToBottom(true);
     },
 
     appendTextDelta: function(id, delta) {
@@ -847,8 +891,9 @@
       pendingCards = [];
       if (pendingSources.length && !opts.error) {
         entry.container.appendChild(renderSources(pendingSources));
-        pendingSources = [];
       }
+      pendingSources = [];
+      if (currentAnswerId === id) currentAnswerId = null;
       if (composeMode && !opts.error && entry.raw && !entry.insertButton) {
         var foot = elt('div', 'msg-foot');
         entry.insertButton = button('btn btn-small btn-ghost', 'Insert into email');
@@ -857,7 +902,7 @@
         });
         foot.appendChild(entry.insertButton);
         entry.container.appendChild(foot);
-      } else if (!composeMode && hasSingleSelection && !opts.error && entry.raw && !entry.replyFoot) {
+      } else if (!composeMode && hasSingleSelection && opts.can_reply && !opts.error && entry.raw && !entry.replyFoot) {
         var rfoot = elt('div', 'msg-foot');
         var openReply = button('btn btn-small btn-primary', 'Open reply');
         var openReplyAll = button('btn btn-small btn-ghost', 'Reply all');
@@ -904,8 +949,13 @@
         outlook_list_folders:              'Listing folders',
         outlook_search_messages:           'Searching messages',
         outlook_read_message:              'Reading message',
+        outlook_read_messages:             'Reading messages',
         outlook_count_messages:            'Counting messages',
+        outlook_aggregate_messages:        'Grouping messages',
         outlook_list_recent_threads_with:  'Listing recent threads',
+        outlook_export_excel:              'Saving Excel workbook',
+        outlook_export_pdf:                'Saving PDF report',
+        outlook_export_search_results:     'Exporting search results',
         outlook_create_draft:              'Creating draft',
         outlook_mark_as_read:              'Marking as read',
         outlook_flag_message:              'Flagging message',
@@ -1061,6 +1111,10 @@
       $messages.innerHTML = '';
       assistantMessages = {};
       toolCards = {};
+      pendingSources = [];
+      pendingCards = [];
+      ruleCards = {};
+      currentAnswerId = null;
     },
 
     applyTheme: function(themeName) {
@@ -1647,11 +1701,294 @@
       $stylePicker.hidden = false;
     },
 
+    // Populates the Memory textarea after "Learn my style" finishes analyzing recent sent emails.
+    setMemoryDraft: function(note, statusText) {
+      if ($btnLearnStyle) $btnLearnStyle.disabled = false;
+      if ($learnStyleStatus) $learnStyleStatus.textContent = statusText || '';
+      if (typeof note === 'string' && note && $memoryInput) {
+        $memoryInput.value = note;
+        $memoryInput.focus();
+      }
+    },
+
+    // Cached colleague hints for @ autocomplete in the composer: [{name, email, meta}].
+    setPeopleHints: function(list) {
+      peopleHints = Array.isArray(list) ? list : [];
+    },
+
+    // Interactive pre-search setup card for "Schedule a meeting": lets the user pick
+    // timeframe (Today / This week / Next week / Custom date), duration, location
+    // (preferred building room vs Microsoft Teams), CC availability check, and tentative handling.
+    showScheduleSetup: function(data) {
+      data = data || {};
+      var node = elt('div', 'msg msg-assistant msg-draft msg-schedule-setup');
+      var head = elt('div', 'draft-head');
+      head.appendChild(elt('span', 'draft-title', 'Schedule meeting'));
+      var status = elt('span', 'draft-status', 'choose options');
+      head.appendChild(status);
+
+      var body = elt('div', 'msg-content sched-body');
+      var subjRow = elt('div', 'sched-field');
+      subjRow.appendChild(elt('label', 'sched-label', 'Topic'));
+      var subjInput = document.createElement('input');
+      subjInput.type = 'text';
+      subjInput.className = 'composer-input sched-text';
+      subjInput.dir = 'auto';
+      subjInput.value = data.subject || 'Meeting';
+      subjRow.appendChild(subjInput);
+      body.appendChild(subjRow);
+
+      var reqChecks = [];
+      var reqList = Array.isArray(data.required) ? data.required : [];
+      var extraReqInput = null;
+      if (reqList.length) {
+        var reqRow = elt('div', 'sched-field');
+        reqRow.appendChild(elt('div', 'sched-label', 'Required attendees (plus you)'));
+        var reqWrap = elt('div', 'sched-pills');
+        reqList.forEach(function(person) {
+          var lbl = elt('label', 'sched-person-pill on');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = true;
+          cb.value = String(person);
+          cb.addEventListener('change', function() { lbl.classList.toggle('on', cb.checked); });
+          reqChecks.push(cb);
+          lbl.appendChild(cb);
+          var sp = elt('span', '', String(person));
+          sp.dir = 'auto';
+          lbl.appendChild(sp);
+          reqWrap.appendChild(lbl);
+        });
+        reqRow.appendChild(reqWrap);
+        body.appendChild(reqRow);
+      } else {
+        var whoRow = elt('div', 'sched-field');
+        whoRow.appendChild(elt('label', 'sched-label', 'Attendees (names or emails, comma-separated)'));
+        extraReqInput = document.createElement('input');
+        extraReqInput.type = 'text';
+        extraReqInput.className = 'composer-input sched-text';
+        extraReqInput.dir = 'auto';
+        extraReqInput.placeholder = 'e.g. Sara, Khalid...';
+        whoRow.appendChild(extraReqInput);
+        body.appendChild(whoRow);
+      }
+
+      var optChecks = [];
+      var optList = Array.isArray(data.optional) ? data.optional : [];
+      if (optList.length) {
+        var optRow = elt('div', 'sched-field');
+        optRow.appendChild(elt('div', 'sched-label', 'Optional (CC)'));
+        var optWrap = elt('div', 'sched-pills');
+        optList.forEach(function(person) {
+          var lbl = elt('label', 'sched-person-pill on');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = true;
+          cb.value = String(person);
+          cb.addEventListener('change', function() { lbl.classList.toggle('on', cb.checked); });
+          optChecks.push(cb);
+          lbl.appendChild(cb);
+          var sp = elt('span', '', String(person));
+          sp.dir = 'auto';
+          lbl.appendChild(sp);
+          optWrap.appendChild(lbl);
+        });
+        optRow.appendChild(optWrap);
+        body.appendChild(optRow);
+      }
+
+      function makeChoiceRow(labelText, choices, initialValue, onChange) {
+        var row = elt('div', 'sched-field');
+        row.appendChild(elt('div', 'sched-label', labelText));
+        var bar = elt('div', 'sched-seg');
+        var current = initialValue;
+        var btns = [];
+        choices.forEach(function(ch) {
+          var b = button('sched-seg-btn' + (ch.value === current ? ' on' : ''), ch.label);
+          b.addEventListener('click', function() {
+            current = ch.value;
+            btns.forEach(function(x) { x.btn.classList.toggle('on', x.value === current); });
+            if (onChange) onChange(current);
+          });
+          btns.push({ value: ch.value, btn: b });
+          bar.appendChild(b);
+        });
+        row.appendChild(bar);
+        body.appendChild(row);
+        return function() { return current; };
+      }
+
+      var customDateInput = document.createElement('input');
+      customDateInput.type = 'date';
+      customDateInput.className = 'composer-input sched-date';
+      customDateInput.hidden = true;
+      var dNow = new Date();
+      customDateInput.value = dNow.getFullYear() + '-' + ('0' + (dNow.getMonth() + 1)).slice(-2) + '-' + ('0' + dNow.getDate()).slice(-2);
+
+      var getWhen = makeChoiceRow('When', [
+        { label: 'Today', value: 'today' },
+        { label: 'This week', value: 'this_week' },
+        { label: 'Next week', value: 'next_week' },
+        { label: 'Specific date', value: 'custom' }
+      ], data.period || 'this_week', function(val) {
+        customDateInput.hidden = val !== 'custom';
+      });
+      body.appendChild(customDateInput);
+
+      var getDuration = makeChoiceRow('Duration (excludes 12:30-13:30 break)', [
+        { label: '30 min', value: 30 },
+        { label: '45 min', value: 45 },
+        { label: '1 hour', value: 60 },
+        { label: '90 min', value: 90 }
+      ], data.duration || 60);
+
+      var prefBld = data.preferred_building || 'HO1';
+      var otherBld = prefBld === 'HO2' ? 'HO1' : 'HO2';
+      var getLocation = makeChoiceRow('Location', [
+        { label: prefBld + ' Room (verified free)', value: prefBld },
+        { label: 'Microsoft Teams', value: 'Teams' },
+        { label: otherBld + ' Room', value: otherBld }
+      ], data.location || prefBld);
+
+      var toggles = elt('div', 'sched-toggles');
+      var checkOptBox = document.createElement('input');
+      checkOptBox.type = 'checkbox';
+      checkOptBox.checked = false;
+      if (optList.length) {
+        var optCheckLbl = elt('label', 'sched-check');
+        optCheckLbl.appendChild(checkOptBox);
+        optCheckLbl.appendChild(elt('span', '', 'Check Optional (CC) calendars too'));
+        toggles.appendChild(optCheckLbl);
+      }
+
+      var ignoreTentBox = document.createElement('input');
+      ignoreTentBox.type = 'checkbox';
+      ignoreTentBox.checked = true;
+      var tentLbl = elt('label', 'sched-check');
+      tentLbl.appendChild(ignoreTentBox);
+      tentLbl.appendChild(elt('span', '', 'Ignore unaccepted / tentative invitations'));
+      toggles.appendChild(tentLbl);
+      body.appendChild(toggles);
+
+      var foot = elt('div', 'draft-foot');
+      var findBtn = button('btn btn-small btn-primary', 'Find available times & rooms');
+      var cancelBtn = button('btn btn-small btn-ghost', 'Cancel');
+      findBtn.addEventListener('click', function() {
+        var chosenReq = reqChecks.filter(function(c) { return c.checked; }).map(function(c) { return c.value; });
+        if (extraReqInput && extraReqInput.value.trim()) {
+          extraReqInput.value.split(/[,;\n]+/).forEach(function(s) {
+            if (s.trim()) chosenReq.push(s.trim());
+          });
+        }
+        var chosenOpt = optChecks.filter(function(c) { return c.checked; }).map(function(c) { return c.value; });
+        findBtn.disabled = true;
+        status.textContent = 'checking calendars & rooms...';
+        if (node.parentNode) node.parentNode.removeChild(node);
+        postToHost({
+          type: 'schedule_search',
+          payload: {
+            subject: subjInput.value.trim() || data.subject || 'Meeting',
+            required: chosenReq,
+            optional: chosenOpt,
+            period: getWhen(),
+            custom_date: customDateInput.value || '',
+            duration: getDuration(),
+            location: getLocation(),
+            check_optional: !!checkOptBox.checked,
+            ignore_tentative: !!ignoreTentBox.checked,
+            message_id: data.message_id || ''
+          }
+        });
+      });
+      cancelBtn.addEventListener('click', function() {
+        if (node.parentNode) node.parentNode.removeChild(node);
+      });
+      foot.appendChild(findBtn);
+      foot.appendChild(cancelBtn);
+
+      node.appendChild(head);
+      node.appendChild(body);
+      node.appendChild(foot);
+      $messages.appendChild(node);
+      scrollToBottom(true);
+    },
+
     // Used by C# during dev to verify the bridge is live before
     // pushing real messages. Returns a string from JS that C# can
     // assert on with await ExecuteScriptAsync("jameelcopilot.ping()").
     ping: function() { return 'pong'; }
   };
+
+  var peopleHints = [];
+  var mentionItems = [];
+  var mentionIndex = 0;
+  var mentionStart = -1;
+
+  function hideMentions() {
+    mentionItems = [];
+    mentionIndex = 0;
+    mentionStart = -1;
+    if ($mentionMenu) {
+      $mentionMenu.hidden = true;
+      empty($mentionMenu);
+    }
+  }
+
+  function applyMention(person) {
+    if (!person || mentionStart < 0 || !$input) { hideMentions(); return; }
+    var val = $input.value;
+    var caret = typeof $input.selectionStart === 'number' ? $input.selectionStart : val.length;
+    var insert = (person.name || person.email || '') + (person.email && person.name ? ' <' + person.email + '>' : '') + ' ';
+    $input.value = val.slice(0, mentionStart) + insert + val.slice(caret);
+    var nextPos = mentionStart + insert.length;
+    hideMentions();
+    try {
+      $input.focus();
+      $input.setSelectionRange(nextPos, nextPos);
+    } catch (e) { /* best-effort */ }
+  }
+
+  function updateMentions() {
+    if (!$mentionMenu || !$input || !peopleHints.length) { hideMentions(); return; }
+    var val = $input.value;
+    var caret = typeof $input.selectionStart === 'number' ? $input.selectionStart : val.length;
+    var before = val.slice(0, caret);
+    var at = before.lastIndexOf('@');
+    if (at < 0 || (at > 0 && !/\s/.test(before.charAt(at - 1)))) { hideMentions(); return; }
+    var query = before.slice(at + 1);
+    if (query.length > 36 || /\n/.test(query)) { hideMentions(); return; }
+    var q = query.toLowerCase();
+    var matches = peopleHints.filter(function(p) {
+      if (!p) return false;
+      var n = String(p.name || '').toLowerCase();
+      var em = String(p.email || '').toLowerCase();
+      var m = String(p.meta || '').toLowerCase();
+      return !q || n.indexOf(q) >= 0 || em.indexOf(q) >= 0 || m.indexOf(q) >= 0;
+    }).slice(0, 6);
+    if (!matches.length) { hideMentions(); return; }
+    mentionStart = at;
+    mentionItems = matches;
+    if (mentionIndex >= matches.length) mentionIndex = 0;
+    empty($mentionMenu);
+    matches.forEach(function(p, idx) {
+      var btn = button('mention-item' + (idx === mentionIndex ? ' active' : ''), '');
+      var nm = elt('span', 'mention-name', p.name || p.email || '');
+      nm.dir = 'auto';
+      btn.appendChild(nm);
+      var sub = [p.meta || '', p.email || ''].filter(Boolean).join(' \u00B7 ');
+      if (sub) {
+        var mt = elt('span', 'mention-meta', sub);
+        mt.dir = 'auto';
+        btn.appendChild(mt);
+      }
+      btn.addEventListener('mousedown', function(ev) {
+        ev.preventDefault();
+        applyMention(p);
+      });
+      $mentionMenu.appendChild(btn);
+    });
+    $mentionMenu.hidden = false;
+  }
 
   window.jameelcopilot = window.jameelcopilot || {};
   for (var apiName in api) {
@@ -1662,6 +1999,7 @@
 
   // -- Composer event wiring --------------------------------------
   function sendInput() {
+    hideMentions();
     // Guard against double-send when a previous turn is still running.
     // The host disables $input + $btnSend when a turn is in flight, but
     // a fast Enter or a race between WebMessageReceived and the C# side
@@ -1684,6 +2022,7 @@
     postToHost({ type: 'stop' });
   });
   $btnDraft.addEventListener('click', function() {
+    hideMentions();
     if ($input.disabled || $btnDraft.disabled) return;
     var text = $input.value.trim();
     if (!text) {
@@ -1711,6 +2050,7 @@
       showView('chat');
       return;
     }
+    if ($learnStyleStatus) $learnStyleStatus.textContent = '';
     postToHost({ type: 'show_memory' });
     showView('memory');
   });
@@ -1736,8 +2076,17 @@
       return;
     }
     $memoryInput.value = '';
+    if ($learnStyleStatus) $learnStyleStatus.textContent = '';
     postToHost({ type: 'memory_add', payload: { text: text } });
   });
+  if ($btnLearnStyle) {
+    $btnLearnStyle.addEventListener('click', function() {
+      if ($btnLearnStyle.disabled) return;
+      $btnLearnStyle.disabled = true;
+      if ($learnStyleStatus) $learnStyleStatus.textContent = 'Reading your recent sent emails...';
+      postToHost({ type: 'learn_style' });
+    });
+  }
   $btnCopy.addEventListener('click', function() {
     postToHost({ type: 'copy' });
   });
@@ -1745,8 +2094,35 @@
     postToHost({ type: 'set_style', payload: { style: $styleSelect.value } });
   });
 
-  // Enter sends, Shift+Enter inserts a newline (standard chat UX).
+  $input.addEventListener('input', updateMentions);
+  $input.addEventListener('blur', function() { setTimeout(hideMentions, 150); });
+
+  // Enter sends, Shift+Enter inserts a newline (standard chat UX); @ menu intercepts arrows/Tab/Enter/Escape.
   $input.addEventListener('keydown', function(e) {
+    if ($mentionMenu && !$mentionMenu.hidden && mentionItems.length) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex + 1) % mentionItems.length;
+        updateMentions();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        mentionIndex = (mentionIndex + mentionItems.length - 1) % mentionItems.length;
+        updateMentions();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        applyMention(mentionItems[mentionIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        hideMentions();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendInput();

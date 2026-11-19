@@ -35,12 +35,30 @@ namespace JameelCopilot.Services
         }
 
         /// <summary>The action's instructions for this window. They never hold mail text.</summary>
-        public static string Instructions(ActionType action, ComposeStateResult state)
+        public static string Instructions(ActionType action, ComposeStateResult state, string replyIntent = null)
         {
             if (!WritesReply(action, state)) return CustomApiChatService.GetSystemPrompt(action);
+            var intentDirective = ReplyIntentDirective(replyIntent);
             return "The user has not written anything yet. Write the user's reply to the message under Context, " + Manner(action) + ". " +
-                   "Answer what the message asks of the user. Do not invent facts, decisions, dates, numbers or commitments the user has not given: " +
-                   "where the reply needs one, leave a short placeholder in square brackets, such as [date], for the user to fill in.";
+                   (string.IsNullOrEmpty(intentDirective) ? "Answer what the message asks of the user. " : intentDirective + " ") +
+                   "Do not invent facts, decisions, dates, numbers or commitments the user has not given: " +
+                   "where the reply needs one, leave a short placeholder in square brackets, such as [date], for the user to fill in. " +
+                   "Do not add a sign-off, closing line (such as 'Thanks,' or 'Regards,'), or the user's name at the end: Outlook adds their signature.";
+        }
+
+        private static string ReplyIntentDirective(string intent)
+        {
+            switch ((intent ?? "").ToLowerInvariant())
+            {
+                case "approve":
+                    return "Confirm approval / agreement clearly and politely, acknowledge the key point, and note any next step (using [placeholder] only where a missing date or detail is required).";
+                case "clarify":
+                    return "Ask brief, polite clarifying questions about any missing details, scope, timeline, or open points in the message before committing.";
+                case "decline":
+                    return "Politely and respectfully decline or push back on the request, leaving a brief [reason / alternative] placeholder if needed while keeping warm professional rapport.";
+                default:
+                    return "";
+            }
         }
 
         private static string Manner(ActionType action)
@@ -76,14 +94,16 @@ namespace JameelCopilot.Services
         {
             var subject = (message?.Subject ?? "").Trim();
             var from = (message?.From ?? "").Trim();
+            var hasReplyPrefix = subject.StartsWith("RE:", System.StringComparison.OrdinalIgnoreCase)
+                || subject.StartsWith("\u0631\u062F:", System.StringComparison.Ordinal);
             return new ComposeStateResult
             {
                 SenderName = ownerName ?? "",
                 SenderEmail = ownerEmail ?? "",
                 ToRecipients = from.Length == 0 ? new string[0] : new[] { from },
-                CcRecipients = new string[0],
+                CcRecipients = message?.Cc ?? new string[0],
                 BccRecipients = new string[0],
-                Subject = subject.StartsWith("RE:", System.StringComparison.OrdinalIgnoreCase) ? subject : ("RE: " + subject).Trim(),
+                Subject = hasReplyPrefix ? subject : ("RE: " + subject).Trim(),
                 BodyPlaintext = "",
                 QuotedPlaintext = message == null
                     ? ""
@@ -97,6 +117,11 @@ namespace JameelCopilot.Services
             "Do not repeat the earlier email and do not invent a deadline.";
 
         public const string FollowUpRequest = "Write my follow-up to my earlier email under Context.";
+
+        public const string LearnStyleInstructions =
+            "Analyze the user's own sent email excerpts under Context and write ONE concise preference note (one line, at most 260 characters, no bullet markers, no quotation marks, no personal names or confidential details) " +
+            "describing how the user writes emails so an assistant can match their voice: typical greeting, tone and directness, sentence/paragraph length, Arabic vs English habits, and preferred closing style. " +
+            "Start directly with: My writing style: ";
 
         /// <summary>
         /// The window a follow-up to the user's own sent email starts as: the

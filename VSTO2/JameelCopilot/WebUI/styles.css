@@ -1112,3 +1112,164 @@ html, body {
 .rule-line { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .rule-label { color: var(--text-muted); }
 .rule-value { font-weight: 600; overflow-wrap: anywhere; }
+
+/* ---- 1.6 Smart features: Learn my style, Copy times, @ colleague mentions ---- */
+.memory-add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.meeting-pick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+.meeting-pick-row .meeting-pick {
+  margin-top: 0;
+}
+.composer {
+  position: relative;
+}
+.mention-menu {
+  position: absolute;
+  bottom: calc(100% - 6px);
+  inset-inline-start: 12px;
+  inset-inline-end: 12px;
+  max-height: 176px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--pale-border);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(28, 25, 36, 0.14);
+  z-index: 20;
+  padding: 4px;
+}
+.mention-menu[hidden] {
+  display: none;
+}
+.mention-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--text);
+  font: 12px var(--font-stack);
+  text-align: start;
+  cursor: pointer;
+}
+.mention-item:hover,
+.mention-item.active {
+  background: var(--pale);
+}
+.mention-name {
+  font-weight: 600;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Interactive Schedule Meeting setup card ---- */
+.sched-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sched-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sched-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sched-text,
+.sched-date {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+  resize: none;
+}
+.sched-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sched-person-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--tool-bg);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  max-width: 100%;
+}
+.sched-person-pill.on {
+  background: var(--pale);
+  border-color: var(--pale-border);
+  color: var(--accent);
+  font-weight: 500;
+}
+.sched-person-pill input {
+  margin: 0;
+}
+.sched-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sched-seg-btn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: var(--panel);
+  color: var(--text-muted);
+  font: 500 11.5px var(--font-stack);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.sched-seg-btn:hover {
+  background: var(--pale);
+  color: var(--accent);
+}
+.sched-seg-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+.sched-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.sched-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.sched-check input {
+  margin: 0;
+}

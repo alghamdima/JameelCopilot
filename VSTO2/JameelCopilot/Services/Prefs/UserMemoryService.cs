@@ -77,7 +77,7 @@ namespace JameelCopilot.Services.Prefs
             }
         }
 
-        /// <summary>False when the note is not there or the new text is empty.</summary>
+        /// <summary>False when the note is not there, empty, or duplicates another note.</summary>
         public bool Update(string id, string text)
         {
             var clean = Clean(text);
@@ -85,7 +85,7 @@ namespace JameelCopilot.Services.Prefs
             {
                 var read = Refresh();
                 var note = _notes.FirstOrDefault(n => n.Id == id);
-                if (note == null || clean.Length == 0) return false;
+                if (note == null || clean.Length == 0 || _notes.Any(n => n.Id != id && Same(n.Text, clean))) return false;
                 note.Text = clean;
                 Changed(note.Id, read);
                 return true;

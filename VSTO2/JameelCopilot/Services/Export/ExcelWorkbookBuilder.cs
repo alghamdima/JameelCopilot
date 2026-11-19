@@ -43,8 +43,9 @@ namespace JameelCopilot.Services.Export
 
             if (columns.Count > 0)
             {
-                worksheet.Range(1, 1, Math.Max(rows.Count + 1, 1), columns.Count).SetAutoFilter();
-                worksheet.Columns(1, columns.Count).AdjustToContents();
+                var lastRow = Math.Max(rows.Count + 1, 1);
+                worksheet.Range(1, 1, lastRow, columns.Count).SetAutoFilter();
+                worksheet.Columns(1, columns.Count).AdjustToContents(1, Math.Min(lastRow, 250), 8.0, 75.0);
             }
 
             return workbook;

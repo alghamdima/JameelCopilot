@@ -55,12 +55,28 @@ namespace JameelCopilot.Services.Export
 
             var text = ToText(value);
             var candidate = text.Trim();
-            if (candidate.StartsWith("$", StringComparison.Ordinal)) candidate = candidate.Substring(1);
+            var negative = false;
+            if (candidate.Length > 2 && candidate[0] == '(' && candidate[candidate.Length - 1] == ')')
+            {
+                negative = true;
+                candidate = candidate.Substring(1, candidate.Length - 2).Trim();
+            }
+            else if (candidate.StartsWith("-", StringComparison.Ordinal))
+            {
+                negative = true;
+                candidate = candidate.Substring(1).Trim();
+            }
+            if (candidate.StartsWith("$", StringComparison.Ordinal)) candidate = candidate.Substring(1).Trim();
+            else if (candidate.StartsWith("SAR", StringComparison.OrdinalIgnoreCase)) candidate = candidate.Substring(3).Trim();
+            else if (candidate.StartsWith("SR", StringComparison.OrdinalIgnoreCase) && candidate.Length > 2 && !char.IsLetter(candidate[2])) candidate = candidate.Substring(2).Trim();
+            if (candidate.EndsWith("SAR", StringComparison.OrdinalIgnoreCase)) candidate = candidate.Substring(0, candidate.Length - 3).Trim();
+            if (candidate.EndsWith("\u0631.\u0633", StringComparison.Ordinal)) candidate = candidate.Substring(0, candidate.Length - 3).Trim();
+            if (candidate.EndsWith("\u0631\u064A\u0627\u0644", StringComparison.Ordinal)) candidate = candidate.Substring(0, candidate.Length - 4).Trim();
             candidate = candidate.Replace(",", "");
 
             double parsed;
             return double.TryParse(candidate, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)
-                ? (object)parsed
+                ? (object)(negative ? -parsed : parsed)
                 : text;
         }
 

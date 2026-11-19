@@ -284,5 +284,38 @@ namespace JameelCopilot.Tests.Services.Tools
                 Assert.Contains("MeetingProposal.FromResult(resultJson)", source);
             }
         }
+
+        [Fact]
+        public async Task ProposeMeeting_FiltersOutHallucinatedBusySlots_AndUnescapesLiteralNewlinesInAgenda()
+        {
+            // Thursday 2026-11-19: "me" is busy 11:30-12:00 (slot 23 = '2').
+            // Model proposes 10:00-11:00, 11:00-12:00 (conflicts with 11:30-12:00!), and 13:30-14:30.
+            var meChars = Enumerable.Repeat('0', 48).ToArray();
+            meChars[23] = '2';   // 11:30-12:00 busy ('1:1 Moe AlGhamdi')
+            var calendar = new Calendar
+            {
+                FreeBusy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["me"] = new string(meChars),
+                    ["otaibiatm@example.com"] = new string('0', 48),
+                }
+            };
+
+            var args = "{\"subject\":\"Hosting and Deployment\",\"attendees\":[\"otaibiatm@example.com\"]," +
+                       "\"agenda\":\"Goal: Review\\n\\nKey points:\\n- Item 1\"," +
+                       "\"slots\":[" +
+                       "{\"start\":\"2026-11-19T10:00\",\"end\":\"2026-11-19T11:00\"}," +
+                       "{\"start\":\"2026-11-19T11:00\",\"end\":\"2026-11-19T12:00\"}," +
+                       "{\"start\":\"2026-11-19T13:30\",\"end\":\"2026-11-19T14:30\"}" +
+                       "]}";
+
+            var result = await new ProposeMeetingTool().ExecuteAsync(args, calendar, CancellationToken.None);
+            var json = JObject.Parse(result);
+
+            var returnedStarts = json["slots"].Select(s => (string)s["start"]).ToArray();
+            Assert.Equal(new[] { "2026-11-19T10:00", "2026-11-19T13:30" }, returnedStarts);
+            Assert.DoesNotContain("\\n", (string)json["agenda"]);
+            Assert.Contains("Goal: Review\n\nKey points:\n- Item 1", (string)json["agenda"]);
+        }
     }
 }

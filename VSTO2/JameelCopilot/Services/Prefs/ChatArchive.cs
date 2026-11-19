@@ -30,6 +30,7 @@ namespace JameelCopilot.Services.Prefs
         /// <summary>"user" or "assistant".</summary>
         public string Role { get; set; }
         public string Text { get; set; }
+        public bool Chip { get; set; }
     }
 
     public sealed class ChatSummary
@@ -140,7 +141,7 @@ namespace JameelCopilot.Services.Prefs
             if (chat == null || chat.Messages == null) return;
             var messages = chat.Messages
                 .Where(m => m != null && !string.IsNullOrWhiteSpace(m.Text) && (m.Role == "user" || m.Role == "assistant"))
-                .Select(m => new SavedMessage { Role = m.Role, Text = Cut(m.Text, MaxMessageChars) })
+                .Select(m => new SavedMessage { Role = m.Role, Text = Cut(m.Text, MaxMessageChars), Chip = m.Chip })
                 .ToList();
             if (messages.Count == 0) return;
             if (messages.Count > MaxMessages) messages = messages.Skip(messages.Count - MaxMessages).ToList();
@@ -226,7 +227,8 @@ namespace JameelCopilot.Services.Prefs
                 var role = item["role"]?.Type == JTokenType.String ? (string)item["role"] : null;
                 if (role != "user" && role != "assistant") continue;
                 var text = TextOf(item["content"]);
-                if (!string.IsNullOrWhiteSpace(text)) messages.Add(new SavedMessage { Role = role, Text = text });
+                var chip = item[StructuredAnswers.ChipLineMark]?.Type == JTokenType.Boolean && (bool)item[StructuredAnswers.ChipLineMark];
+                if (!string.IsNullOrWhiteSpace(text)) messages.Add(new SavedMessage { Role = role, Text = text, Chip = chip });
             }
             return messages;
         }
@@ -235,8 +237,13 @@ namespace JameelCopilot.Services.Prefs
         public static List<JObject> ToHistory(SavedChat chat)
         {
             return (chat?.Messages ?? new List<SavedMessage>())
-                .Select(m => new JObject(
-                    new JProperty("type", "message"), new JProperty("role", m.Role), new JProperty("content", m.Text ?? "")))
+                .Select(m =>
+                {
+                    var obj = new JObject(
+                        new JProperty("type", "message"), new JProperty("role", m.Role), new JProperty("content", m.Text ?? ""));
+                    if (m.Chip) obj.Add(StructuredAnswers.ChipLineMark, true);
+                    return obj;
+                })
                 .ToList();
         }
 
@@ -313,9 +320,10 @@ namespace JameelCopilot.Services.Prefs
                 {
                     var role = Text(m["r"]);
                     var text = Text(m["t"]);
+                    var chip = m["c"]?.Type == JTokenType.Boolean && (bool)m["c"];
                     if ((role == "user" || role == "assistant") && !string.IsNullOrWhiteSpace(text))
                     {
-                        chat.Messages.Add(new SavedMessage { Role = role, Text = text });
+                        chat.Messages.Add(new SavedMessage { Role = role, Text = text, Chip = chip });
                     }
                 }
                 return chat;
@@ -335,7 +343,11 @@ namespace JameelCopilot.Services.Prefs
                 new JProperty("scope", chat.Scope),
                 new JProperty("updated", chat.Updated.ToString("o")),
                 new JProperty("messages", new JArray(chat.Messages.Select(m =>
-                    new JObject(new JProperty("r", m.Role), new JProperty("t", m.Text)))))).ToString(Formatting.None);
+                {
+                    var msg = new JObject(new JProperty("r", m.Role), new JProperty("t", m.Text));
+                    if (m.Chip) msg.Add("c", true);
+                    return msg;
+                })))).ToString(Formatting.None);
         }
 
         private static string IndexJson(IEnumerable<ChatSummary> index)
@@ -391,7 +403,10 @@ namespace JameelCopilot.Services.Prefs
         private static string Cut(string text, int max)
         {
             const char ellipsis = (char)0x2026;
-            return text.Length <= max ? text : text.Substring(0, max - 1) + ellipsis;
+            if (text.Length <= max) return text;
+            var take = max - 1;
+            if (take > 0 && char.IsHighSurrogate(text[take - 1])) take--;
+            return text.Substring(0, take) + ellipsis;
         }
     }
 }

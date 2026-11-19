@@ -74,7 +74,7 @@ namespace JameelCopilot.TaskPane.InboxCopilot
                 Send("Unread", "Summarize all my unread messages. Group by sender or topic. Be concise."),
                 Send("Today", "Show me everything I received today, grouped by sender. Highlight anything that looks urgent."),
                 Send("Today's agenda", "List my meetings today in order from my calendar: time, subject, who, where. Point out clashes and gaps longer than an hour."),
-                Send("Prepare for my next meeting", "Find my next meeting in my calendar today or tomorrow. Then look through my mail of the last 30 days about it (its subject words and its attendees) and read the most relevant messages. Tell me what it is about, what was agreed, what is still open, and what I should prepare.")));
+                Send("Prepare for my next meeting", "Find my next upcoming meeting in my calendar today or tomorrow. Run at most 2 targeted searches in my recent mail of the last 30 days using distinctive subject words or the organizer's name, read the top 3 to 5 most relevant messages, and immediately brief me: what it is about, what was agreed, what is still open, and what I should prepare.")));
 
             groups.Add(new QuickActionGroup("Reports",
                 Report("Week digest", "Summarize what came into my Inbox over the past 7 days. Group by sender or topic. Highlight urgent items and emails I'm directly addressed in."),

@@ -43,7 +43,7 @@ namespace JameelCopilot.Services.Tools
         public static List<Tuple<DateTime, DateTime>> Find(
             IEnumerable<string> freeBusy, DateTime gridStart, DateTime from, DateTime to, int durationMinutes,
             TimeSpan dayStart, TimeSpan dayEnd, ISet<DayOfWeek> workDays, int max = 8, int perDay = 3,
-            Func<DateTime, DateTime, bool> skipSlot = null)
+            Func<DateTime, DateTime, bool> skipSlot = null, bool ignoreTentative = false)
         {
             var grids = freeBusy.Where(f => f != null).ToList();
             var need = Math.Max(1, (durationMinutes + SlotMinutes - 1) / SlotMinutes);
@@ -60,7 +60,7 @@ namespace JameelCopilot.Services.Tools
                     if (skipSlot != null && skipSlot(start, end)) continue;
                     var first = (int)((start - gridStart).TotalMinutes / SlotMinutes);
                     if (first < 0) continue;
-                    var free = grids.All(g => first + need <= g.Length && g.Substring(first, need).All(c => c == '0'));
+                    var free = grids.All(g => first + need <= g.Length && g.Substring(first, need).All(c => IsFreeChar(c, ignoreTentative)));
                     if (!free) continue;
                     found.Add(Tuple.Create(start, end));
                     today++;
@@ -71,13 +71,59 @@ namespace JameelCopilot.Services.Tools
         }
 
         /// <summary>Whether the whole time is free in a free/busy string; null when the string does not cover it.</summary>
-        public static bool? IsFree(string freeBusy, DateTime gridStart, DateTime start, DateTime end)
+        public static bool? IsFree(string freeBusy, DateTime gridStart, DateTime start, DateTime end, bool ignoreTentative = false)
         {
             if (string.IsNullOrEmpty(freeBusy) || end <= start) return null;
             var first = (int)Math.Floor((start - gridStart).TotalMinutes / SlotMinutes);
             var last = (int)Math.Ceiling((end - gridStart).TotalMinutes / SlotMinutes);   // the first slot after the time
             if (first < 0 || last > freeBusy.Length) return null;
-            return freeBusy.Substring(first, last - first).All(c => c == '0');
+            return freeBusy.Substring(first, last - first).All(c => IsFreeChar(c, ignoreTentative));
+        }
+
+        internal static bool IsFreeChar(char c, bool ignoreTentative)
+        {
+            return c == '0' || (ignoreTentative && c == '1');
+        }
+
+        /// <summary>Resolves "today", "this_week", "next_week", or an explicit YYYY-MM-DD date into [from, to].</summary>
+        public static void ResolvePeriodRange(string period, string customDate, DateTime now, out DateTime from, out DateTime to)
+        {
+            var today = now.Date;
+            var p = (period ?? "this_week").Trim().ToLowerInvariant();
+            if (p == "today")
+            {
+                from = now.TimeOfDay < new TimeSpan(16, 30, 0) ? now : today.AddDays(1).AddHours(8);
+                to = from.Date.AddHours(18);
+                return;
+            }
+            if (p == "custom" && DateTime.TryParseExact((customDate ?? "").Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var picked))
+            {
+                from = picked.Date == today && now.TimeOfDay > new TimeSpan(8, 0, 0) ? now : picked.Date.AddHours(8);
+                to = picked.Date.AddHours(18);
+                return;
+            }
+            if (p == "next_week")
+            {
+                int daysUntilNextSunday = ((int)DayOfWeek.Sunday - (int)today.DayOfWeek + 7) % 7;
+                if (daysUntilNextSunday == 0) daysUntilNextSunday = 7;
+                var nextSun = today.AddDays(daysUntilNextSunday);
+                from = nextSun.AddHours(8);
+                to = nextSun.AddDays(4).AddHours(18);   // Sun..Thu of next week
+                return;
+            }
+            // Default: "this_week" (remaining Sun..Thu of current week; if Thu after 16:00 or Fri/Sat, rolls into next week).
+            int daysToThursday = (int)DayOfWeek.Thursday - (int)today.DayOfWeek;
+            if (daysToThursday < 0 || (daysToThursday == 0 && now.TimeOfDay >= new TimeSpan(16, 0, 0)))
+            {
+                int daysUntilNextSunday = ((int)DayOfWeek.Sunday - (int)today.DayOfWeek + 7) % 7;
+                if (daysUntilNextSunday == 0) daysUntilNextSunday = 7;
+                var nextSun = today.AddDays(daysUntilNextSunday);
+                from = nextSun.AddHours(8);
+                to = nextSun.AddDays(4).AddHours(18);
+                return;
+            }
+            from = now;
+            to = today.AddDays(Math.Max(1, daysToThursday)).AddHours(18);
         }
 
         /// <summary>"sun-thu" (the default) or "mon-fri".</summary>
@@ -167,6 +213,8 @@ namespace JameelCopilot.Services.Tools
                 .Select(t => ((string)t).Trim()).Where(s => s.Length > 0 && !people.Contains(s, StringComparer.OrdinalIgnoreCase))
                 .Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
             var checkOptional = args["check_optional_availability"]?.Type == JTokenType.Boolean && (bool)args["check_optional_availability"];
+            var ignoreTentative = args["ignore_tentative"]?.Type == JTokenType.Boolean && (bool)args["ignore_tentative"];
+            var requiredBuilding = StructuredAnswers.Field(args, "required_room_building", 40);
             var duration = args["duration_minutes"]?.Type == JTokenType.Integer ? (int)args["duration_minutes"] : 60;
             if (duration < 15 || duration > 480) return Task.FromResult(CalendarArgs.Error("duration_minutes must be 15 to 480"));
             var now = DateTime.Now;
@@ -194,33 +242,38 @@ namespace JameelCopilot.Services.Tools
             if (requiredGrids.Count == 0) requiredGrids = freeBusy.Values.Where(v => v != null).ToList();
 
             var allGrids = checkOptional ? freeBusy.Values.Where(v => v != null).ToList() : requiredGrids;
-            var rawAll = MeetingTimes.Find(allGrids, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak);
+            var rawAll = MeetingTimes.Find(allGrids, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak, ignoreTentative: ignoreTentative);
             if (rawAll.Count == 0 && checkOptional && optionalPeople.Count > 0)
             {
-                rawAll = MeetingTimes.Find(requiredGrids, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak);
+                rawAll = MeetingTimes.Find(requiredGrids, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak, ignoreTentative: ignoreTentative);
             }
             if (rawAll.Count == 0)
             {
                 rawAll = MeetingTimes.Find(requiredGrids, from.Date, from, to, duration,
-                    new TimeSpan(8, 0, 0), new TimeSpan(17, 0, 0), workDays, max: 18, perDay: 6, skipSlot: OverlapsBreak);
+                    new TimeSpan(8, 0, 0), new TimeSpan(17, 0, 0), workDays, max: 18, perDay: 6, skipSlot: OverlapsBreak, ignoreTentative: ignoreTentative);
+            }
+            if (rawAll.Count == 0 && !ignoreTentative)
+            {
+                // If strict free ('0') found zero slots across everyone, retry ignoring tentative ('1') invitations.
+                rawAll = MeetingTimes.Find(requiredGrids, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 18, perDay: 6, skipSlot: OverlapsBreak, ignoreTentative: true);
             }
 
             var slots = rawAll
                 .GroupBy(s => s.Item1.Date)
-                .SelectMany(g => g.OrderBy(s => HasAdjacentBusy(allGrids, from.Date, s.Item1, s.Item2) ? 1 : 0).ThenBy(s => s.Item1).Take(3))
-                .Take(9)
+                .SelectMany(g => g.OrderBy(s => HasAdjacentBusy(allGrids, from.Date, s.Item1, s.Item2) ? 1 : 0).ThenBy(s => s.Item1).Take(4))
+                .Take(12)
                 .ToList();
 
             // Partial-availability fallback when 100% overlap has 0 slots.
             var conflictsBySlot = new Dictionary<int, List<string>>();
             if (slots.Count == 0 && people.Count > 1 && myGrid != null)
             {
-                var mySlots = MeetingTimes.Find(new[] { myGrid }, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak);
+                var mySlots = MeetingTimes.Find(new[] { myGrid }, from.Date, from, to, duration, dayStart, dayEnd, workDays, max: 24, perDay: 8, skipSlot: OverlapsBreak, ignoreTentative: ignoreTentative);
                 var bestPartial = mySlots
                     .Select(s => new
                     {
                         Slot = s,
-                        Busy = people.Where(p => freeBusy.TryGetValue(p, out var pg) && pg != null && MeetingTimes.IsFree(pg, from.Date, s.Item1, s.Item2) == false).ToList()
+                        Busy = people.Where(p => freeBusy.TryGetValue(p, out var pg) && pg != null && MeetingTimes.IsFree(pg, from.Date, s.Item1, s.Item2, ignoreTentative) == false).ToList()
                     })
                     .Where(x => x.Busy.Count < people.Count)
                     .OrderBy(x => x.Busy.Count)
@@ -236,10 +289,41 @@ namespace JameelCopilot.Services.Tools
 
             var slotArray = new JArray();
             var book = surface as IPeopleSurface;
-            var prefBuilding = (surface as IOrgSurface)?.GetOrgContext()?.PreferredBuilding ?? "";
+            var prefBuilding = !string.IsNullOrEmpty(requiredBuilding)
+                ? requiredBuilding
+                : ((surface as IOrgSurface)?.GetOrgContext()?.PreferredBuilding ?? "");
+            var noRoomInBuildingSlots = 0;
             for (int i = 0; i < slots.Count; i++)
             {
                 var s = slots[i];
+                List<RoomInfo> verifiedFreeRooms = null;
+                if (book != null && (slotArray.Count < 5 || !string.IsNullOrEmpty(requiredBuilding)))
+                {
+                    var rooms = book.FindRooms(s.Item1, s.Item2, "", FindRoomsTool.MaxRooms);
+                    if (rooms != null)
+                    {
+                        verifiedFreeRooms = rooms
+                            .Where(r => r.Free == true)
+                            .OrderBy(r => !string.IsNullOrEmpty(prefBuilding) && (r.Name ?? "").IndexOf(prefBuilding, StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1)
+                            .ToList();
+                        if (!string.IsNullOrEmpty(requiredBuilding))
+                        {
+                            var inBuilding = verifiedFreeRooms.Where(r => (r.Name ?? "").IndexOf(requiredBuilding, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                            if (inBuilding.Count > 0)
+                            {
+                                verifiedFreeRooms = inBuilding;
+                            }
+                            else
+                            {
+                                noRoomInBuildingSlots++;
+                                // Skip slots where no room in the requested building is actually free, unless all slots lack one.
+                                if (slots.Count - noRoomInBuildingSlots >= 1 && slotArray.Count < 3) continue;
+                            }
+                        }
+                    }
+                }
+
+                if (slotArray.Count >= 6) break;
                 var slotObj = new JObject(
                     new JProperty("start", CalendarArgs.Local(s.Item1)),
                     new JProperty("end", CalendarArgs.Local(s.Item2)));
@@ -249,24 +333,18 @@ namespace JameelCopilot.Services.Tools
                 }
                 if (checkOptional && optionalPeople.Count > 0)
                 {
-                    var optFree = optionalPeople.Where(p => freeBusy.TryGetValue(p, out var og) && og != null && MeetingTimes.IsFree(og, from.Date, s.Item1, s.Item2) == true).ToList();
-                    var optBusy = optionalPeople.Where(p => freeBusy.TryGetValue(p, out var og) && og != null && MeetingTimes.IsFree(og, from.Date, s.Item1, s.Item2) == false).ToList();
+                    var optFree = optionalPeople.Where(p => freeBusy.TryGetValue(p, out var og) && og != null && MeetingTimes.IsFree(og, from.Date, s.Item1, s.Item2, ignoreTentative) == true).ToList();
+                    var optBusy = optionalPeople.Where(p => freeBusy.TryGetValue(p, out var og) && og != null && MeetingTimes.IsFree(og, from.Date, s.Item1, s.Item2, ignoreTentative) == false).ToList();
                     slotObj.Add("optional_free", new JArray(optFree.Cast<object>()));
                     if (optBusy.Count > 0) slotObj.Add("optional_busy", new JArray(optBusy.Cast<object>()));
                 }
-                if (book != null && i < 3)
+                if (verifiedFreeRooms != null)
                 {
-                    var rooms = book.FindRooms(s.Item1, s.Item2, "", FindRoomsTool.MaxRooms);
-                    if (rooms != null)
-                    {
-                        var freeRooms = rooms
-                            .Where(r => r.Free == true)
-                            .OrderBy(r => !string.IsNullOrEmpty(prefBuilding) && (r.Name ?? "").IndexOf(prefBuilding, StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1)
-                            .Take(4)
-                            .Select(r => new JObject(new JProperty("name", r.Name ?? ""), new JProperty("email", r.Email ?? "")))
-                            .ToList();
-                        slotObj.Add("free_rooms", new JArray(freeRooms));
-                    }
+                    var freeRoomObjs = verifiedFreeRooms
+                        .Take(4)
+                        .Select(r => new JObject(new JProperty("name", r.Name ?? ""), new JProperty("email", r.Email ?? "")))
+                        .ToList();
+                    slotObj.Add("free_rooms", new JArray(freeRoomObjs));
                 }
                 slotArray.Add(slotObj);
             }
@@ -313,11 +391,13 @@ namespace JameelCopilot.Services.Tools
         /// <summary>The meeting room's name or address, from outlook_find_rooms; "" for none.</summary>
         public string Room { get; set; }
         public IReadOnlyList<RoomOption> RoomOptions { get; set; }
+        public IReadOnlyList<IReadOnlyList<string>> SlotFreeRoomValues { get; set; }
 
         public sealed class RoomOption
         {
             public string Label { get; set; }
             public string Value { get; set; }
+            public IReadOnlyList<int> FreeSlots { get; set; }
         }
 
         /// <summary>A proposal from the tool's result, or null when it is not one.</summary>
@@ -338,6 +418,7 @@ namespace JameelCopilot.Services.Tools
         internal static MeetingProposal Read(JObject o)
         {
             var slots = new List<Tuple<DateTime, DateTime>>();
+            var slotFreeRoomVals = new List<IReadOnlyList<string>>();
             foreach (var s in (o["slots"] as JArray ?? new JArray()).OfType<JObject>())
             {
                 var start = CalendarArgs.Date(s, "start");
@@ -345,6 +426,11 @@ namespace JameelCopilot.Services.Tools
                 if (start.HasValue && end.HasValue && end > start && (end.Value - start.Value).TotalHours <= 8 && slots.Count < 5)
                 {
                     slots.Add(Tuple.Create(start.Value, end.Value));
+                    var fr = (s["free_rooms"] as JArray ?? new JArray()).OfType<JObject>()
+                        .Select(r => StructuredAnswers.Field(r, "email", 200))
+                        .Where(v => v.Length > 0)
+                        .ToList();
+                    slotFreeRoomVals.Add(fr);
                 }
             }
             var attendees = (o["attendees"] as JArray ?? new JArray()).Where(t => t.Type == JTokenType.String)
@@ -358,8 +444,14 @@ namespace JameelCopilot.Services.Tools
             if (slots.Count == 0 || subject.Length == 0) return null;
             var agendaToken = o["agenda"];
             var agenda = agendaToken != null && agendaToken.Type == JTokenType.String ? (string)agendaToken : "";
+            agenda = agenda.Replace("\\r\\n", "\n").Replace("\\n", "\n");
             var options = (o["room_options"] as JArray ?? new JArray()).OfType<JObject>()
-                .Select(r => new RoomOption { Label = StructuredAnswers.Field(r, "label", 160), Value = StructuredAnswers.Field(r, "value", 200) })
+                .Select(r => new RoomOption
+                {
+                    Label = StructuredAnswers.Field(r, "label", 160),
+                    Value = StructuredAnswers.Field(r, "value", 200),
+                    FreeSlots = (r["free_slots"] as JArray)?.Where(t => t.Type == JTokenType.Integer).Select(t => (int)t).ToList(),
+                })
                 .Where(r => r.Label.Length > 0 && r.Value.Length > 0)
                 .Take(15)
                 .ToList();
@@ -369,6 +461,7 @@ namespace JameelCopilot.Services.Tools
                 Slots = slots, Agenda = agenda.Length > 2000 ? agenda.Substring(0, 2000) : agenda,
                 Room = StructuredAnswers.Field(o, "room", 200),
                 RoomOptions = options,
+                SlotFreeRoomValues = slotFreeRoomVals,
             };
         }
     }
@@ -398,32 +491,91 @@ namespace JameelCopilot.Services.Tools
             var reqAttendees = proposal.Attendees.Where(a => string.IsNullOrEmpty(selfEmail) || !string.Equals(a, selfEmail, StringComparison.OrdinalIgnoreCase)).ToList();
             var optAttendees = (proposal.OptionalAttendees ?? new string[0]).Where(a => string.IsNullOrEmpty(selfEmail) || !string.Equals(a, selfEmail, StringComparison.OrdinalIgnoreCase)).ToList();
 
+            // Verify proposed slots against actual Free/Busy of "me" + required attendees so a model-hallucinated busy slot never reaches the UI card.
+            var calendar = surface as ICalendarSurface;
+            if (calendar != null && proposal.Slots.Count > 1)
+            {
+                var earliestDay = proposal.Slots.Min(s => s.Item1.Date);
+                var fb = calendar.GetFreeBusy(reqAttendees, earliestDay);
+                if (fb != null && fb.Count > 0)
+                {
+                    var validSlots = proposal.Slots.Where(s =>
+                    {
+                        if (FindMeetingTimesTool.OverlapsBreak(s.Item1, s.Item2)) return false;
+                        if (fb.TryGetValue("me", out var myG) && !string.IsNullOrEmpty(myG) && MeetingTimes.IsFree(myG, earliestDay, s.Item1, s.Item2, ignoreTentative: true) == false)
+                        {
+                            return false;
+                        }
+                        foreach (var reqP in reqAttendees)
+                        {
+                            if (fb.TryGetValue(reqP, out var pg) && !string.IsNullOrEmpty(pg) && MeetingTimes.IsFree(pg, earliestDay, s.Item1, s.Item2, ignoreTentative: true) == false)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }).ToList();
+                    if (validSlots.Count > 0)
+                    {
+                        proposal.Slots = validSlots;
+                    }
+                }
+            }
+
+            var slotRoomsJson = new List<JArray>();
             if (book != null && proposal.Slots.Count > 0)
             {
                 var perSlotSets = new List<IReadOnlyList<RoomInfo>>();
                 foreach (var s in proposal.Slots)
                 {
-                    var rs = book.FindRooms(s.Item1, s.Item2, "", FindRoomsTool.MaxRooms);
-                    if (rs != null) perSlotSets.Add(rs);
+                    var rs = book.FindRooms(s.Item1, s.Item2, "", FindRoomsTool.MaxRooms) ?? new RoomInfo[0];
+                    perSlotSets.Add(rs);
+                    var freeInSlot = rs.Where(x => x.Free == true)
+                        .OrderBy(x => !string.IsNullOrEmpty(prefBuilding) && (x.Name ?? "").IndexOf(prefBuilding, StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1)
+                        .Select(x => new JObject(new JProperty("name", x.Name ?? ""), new JProperty("email", !string.IsNullOrEmpty(x.Email) ? x.Email : (x.Name ?? ""))))
+                        .ToList();
+                    slotRoomsJson.Add(new JArray(freeInSlot));
                 }
                 if (perSlotSets.Count > 0)
                 {
                     var firstRooms = perSlotSets[0];
                     var matched = firstRooms.FirstOrDefault(r =>
-                        string.Equals(r.Email, proposal.Room, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(r.Name, proposal.Room, StringComparison.OrdinalIgnoreCase));
+                        (r.Free == true) && (string.Equals(r.Email, proposal.Room, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(r.Name, proposal.Room, StringComparison.OrdinalIgnoreCase)));
+                    if (matched == null && !string.IsNullOrEmpty(proposal.Room) && proposal.Room.IndexOf("Teams", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        // If the model proposed a room that is NOT free on the primary slot, replace it with the first verified free room!
+                        matched = firstRooms
+                            .Where(r => r.Free == true)
+                            .OrderBy(r => !string.IsNullOrEmpty(prefBuilding) && (r.Name ?? "").IndexOf(prefBuilding, StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1)
+                            .FirstOrDefault();
+                        if (matched != null)
+                        {
+                            proposal.Room = !string.IsNullOrEmpty(matched.Email) ? matched.Email : matched.Name;
+                        }
+                    }
                     if (matched != null && !string.IsNullOrEmpty(matched.Name)) roomDisplay = matched.Name;
 
                     foreach (var r in firstRooms.OrderBy(x => !string.IsNullOrEmpty(prefBuilding) && (x.Name ?? "").IndexOf(prefBuilding, StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1))
                     {
                         var val = !string.IsNullOrEmpty(r.Email) ? r.Email : r.Name;
                         if (string.IsNullOrEmpty(val) || string.IsNullOrEmpty(r.Name)) continue;
-                        var freeAll = perSlotSets.All(list => list.Any(x => string.Equals(!string.IsNullOrEmpty(x.Email) ? x.Email : x.Name, val, StringComparison.OrdinalIgnoreCase) && x.Free == true));
-                        var freeAny = perSlotSets.Any(list => list.Any(x => string.Equals(!string.IsNullOrEmpty(x.Email) ? x.Email : x.Name, val, StringComparison.OrdinalIgnoreCase) && x.Free == true));
-                        if (!freeAny) continue;
+                        var freeSlotIndices = new List<int>();
+                        for (int si = 0; si < perSlotSets.Count; si++)
+                        {
+                            if (perSlotSets[si].Any(x => string.Equals(!string.IsNullOrEmpty(x.Email) ? x.Email : x.Name, val, StringComparison.OrdinalIgnoreCase) && x.Free == true))
+                            {
+                                freeSlotIndices.Add(si);
+                            }
+                        }
+                        if (freeSlotIndices.Count == 0) continue;
                         if (!seenValues.Add(val)) continue;
-                        var label = freeAll || perSlotSets.Count == 1 ? r.Name : (r.Name + " (selected slots)");
-                        roomOptions.Add(new JObject(new JProperty("label", label), new JProperty("value", val)));
+                        var freeAll = freeSlotIndices.Count == perSlotSets.Count;
+                        var label = freeAll || perSlotSets.Count == 1 ? r.Name : (r.Name + " (slots " + string.Join(",", freeSlotIndices.Select(idx => idx + 1)) + ")");
+                        roomOptions.Add(new JObject(
+                            new JProperty("label", label),
+                            new JProperty("value", val),
+                            new JProperty("free_slots", new JArray(freeSlotIndices.Cast<object>()))));
                     }
                 }
             }
@@ -439,8 +591,17 @@ namespace JameelCopilot.Services.Tools
                 new JProperty("result_type", "meeting_proposal"),
                 new JProperty("subject", proposal.Subject),
                 new JProperty("attendees", new JArray(reqAttendees.Cast<object>())),
-                new JProperty("slots", new JArray(proposal.Slots.Select(s => new JObject(
-                    new JProperty("start", CalendarArgs.Local(s.Item1)), new JProperty("end", CalendarArgs.Local(s.Item2)))))),
+                new JProperty("slots", new JArray(proposal.Slots.Select((s, idx) =>
+                {
+                    var sj = new JObject(
+                        new JProperty("start", CalendarArgs.Local(s.Item1)),
+                        new JProperty("end", CalendarArgs.Local(s.Item2)));
+                    if (idx < slotRoomsJson.Count && slotRoomsJson[idx].Count > 0)
+                    {
+                        sj.Add("free_rooms", slotRoomsJson[idx]);
+                    }
+                    return sj;
+                }))),
                 new JProperty("agenda", proposal.Agenda),
                 new JProperty("room", proposal.Room),
                 new JProperty("status", "Shown to the user, who picks a time to open the meeting request. Nothing is sent: say that you proposed it."));

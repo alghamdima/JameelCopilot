@@ -27,7 +27,10 @@ namespace JameelCopilot.Services.Export
         public string Render(string title, string subtitle, string markdown, DateTimeOffset generatedAt)
         {
             var safeMarkdown = StripInlineImagesOutsideCodeBlocks(markdown ?? "");
-            var markdownLiteral = JsonConvert.ToString(safeMarkdown, '"', StringEscapeHandling.EscapeHtml);
+            var markdownLiteral = JsonConvert.SerializeObject(safeMarkdown, new JsonSerializerSettings
+            {
+                StringEscapeHandling = StringEscapeHandling.EscapeHtml,
+            });
             var markdownInjection = "window.__JAMEELCOPILOT_MD__ = " + markdownLiteral + ";";
             var titleText = WebUtility.HtmlEncode(title ?? "");
             var subtitleText = WebUtility.HtmlEncode(subtitle ?? "");

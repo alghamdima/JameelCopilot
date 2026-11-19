@@ -15,7 +15,7 @@ namespace JameelCopilot.Services.Prefs
 
         private readonly IUserStore _store;
         private readonly object _lock = new object();
-        private string _style;   // null until loaded
+        private string _style;   // null until a valid read or explicit SetStyle
 
         /// <param name="store">Null keeps the choice for this session only.</param>
         public UserPrefsService(IUserStore store)
@@ -30,7 +30,10 @@ namespace JameelCopilot.Services.Prefs
             {
                 lock (_lock)
                 {
-                    return _style ?? (_style = Load());
+                    if (_style != null) return _style;
+                    var loaded = Load(out var storeAnswered);
+                    if (storeAnswered) _style = loaded;
+                    return loaded;
                 }
             }
         }
@@ -41,22 +44,25 @@ namespace JameelCopilot.Services.Prefs
             lock (_lock)
             {
                 _style = normalized;
-            }
-            try
-            {
-                _store?.Save(ItemName, new JObject(new JProperty("v", 1), new JProperty("style", normalized)).ToString(Formatting.None));
-            }
-            catch (Exception)
-            {
-                // The choice holds for this session.
+                try
+                {
+                    _store?.Save(ItemName, new JObject(new JProperty("v", 1), new JProperty("style", normalized)).ToString(Formatting.None));
+                }
+                catch (Exception)
+                {
+                    // The choice holds for this session.
+                }
             }
         }
 
-        private string Load()
+        private string Load(out bool storeAnswered)
         {
+            storeAnswered = _store == null;
             try
             {
                 var json = _store?.Load(ItemName);
+                if (json == null) return ResponseStyles.Balanced;
+                storeAnswered = true;
                 if (string.IsNullOrWhiteSpace(json)) return ResponseStyles.Balanced;
                 var style = (JToken.Parse(json) as JObject)?["style"];
                 return ResponseStyles.Normalize(style != null && style.Type == JTokenType.String ? (string)style : null);
