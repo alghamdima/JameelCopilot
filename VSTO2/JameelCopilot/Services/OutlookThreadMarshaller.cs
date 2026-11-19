@@ -162,5 +162,33 @@ namespace JameelCopilot.Services
             // identity for "the UI thread".
             return Thread.CurrentThread.ManagedThreadId == _uiThreadId;
         }
+
+        /// <summary>
+        /// Lets Outlook's UI thread pump its message loop between chunks of a
+        /// long marshalled operation. Every <see cref="RunAsync"/> work unit
+        /// blocks the UI thread for as long as it runs (COM demands it), so a
+        /// coarse unit (a folder scan, a folder-tree walk) freezes the whole
+        /// mail client. Awaiting this between small units releases the thread
+        /// long enough for Outlook to paint and answer the user; the caller
+        /// keeps working on its own thread meanwhile.
+        ///
+        /// The posted no-op sits behind whatever Outlook has already queued:
+        /// by the time it runs, the UI thread has serviced its own messages,
+        /// which is exactly the turn we want to give it. Never blocks: the
+        /// caller is off the UI thread already, and on it there is nothing to
+        /// yield to (and posting + waiting there would deadlock).
+        /// </summary>
+        public Task YieldAsync(CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested) return Task.FromResult(false);
+            RecaptureContextIfStale();
+            if (IsOnTargetContext()) return Task.FromResult(false);
+            SynchronizationContext ctx;
+            lock (_lock) ctx = _context;
+            if (ctx == null) return Task.FromResult(false);
+            var tcs = new TaskCompletionSource<bool>();
+            ctx.Post(_ => tcs.TrySetResult(true), null);
+            return tcs.Task;
+        }
     }
 }

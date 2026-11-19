@@ -553,10 +553,11 @@ namespace JameelCopilot.Services.Tools
                         }
                         catch (COMException) { return; }
                         try { total += items.Count; } catch (COMException) { }
-                        YieldUi(ct);
                     }, ct).GetAwaiter().GetResult();
                 }
                 catch (OperationCanceledException) { throw; }
+                // Release Outlook's UI thread between folders (see YieldAsync).
+                try { _marshaller.YieldAsync(ct).GetAwaiter().GetResult(); } catch (OperationCanceledException) { throw; }
             }
             return total;
         }
@@ -2292,13 +2293,19 @@ namespace JameelCopilot.Services.Tools
         // marshaller.RunAsync); DoEvents is safe here because our caller
         // does only read-only enumeration. Cancellation is checked twice
         // so a user Stop click that fires during the pump still aborts.
+        // Cancellation check only. This does NOT pump the UI queue: it runs
+        // inside a marshaller.RunAsync unit, i.e. ON the UI thread, where
+        // pumping is unsafe (see below). Releasing the UI thread is instead
+        // done by the CALLER awaiting marshaller.YieldAsync between units.
         private static void YieldUi(CancellationToken ct)
         {
             if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
             // Never call Application.DoEvents() on Outlook's STA UI thread: reentrant Win32/MAPI
             // message pumping inside Outlook COM calls triggers white-screen repaint storms and
-            // leaves a plain SynchronizationContext behind. Instead, keep each marshaller.RunAsync
-            // work unit small so Outlook's own native message loop pumps cleanly between dispatches.
+            // leaves a plain SynchronizationContext behind, which breaks the marshaller. Instead,
+            // keep each marshaller.RunAsync work unit small, and yield between units from the
+            // worker thread with marshaller.YieldAsync: Outlook's own native message loop then
+            // pumps cleanly between dispatches.
         }
 
         // Phase 3b yielding fallback. Walks each folder via one
@@ -2389,6 +2396,10 @@ namespace JameelCopilot.Services.Tools
                 }
                 catch { }
 
+                // Give Outlook's UI thread a turn between folders. CollectFolderInputs
+                // blocks the UI thread for the whole folder; without this the mail
+                // client freezes until the walk ends.
+                try { _marshaller.YieldAsync(ct).GetAwaiter().GetResult(); } catch (OperationCanceledException) { throw; }
                 if (searchAllMail && args.MaxResults > 0 && args.MaxResults < int.MaxValue
                     && SearchFallbackBudget.DescendingForSortOrder(args.SortOrder)
                     && allInputs.Count >= args.MaxResults && searched >= 2)

@@ -240,6 +240,47 @@ namespace JameelCopilot.Tests.Services
         }
 
         /// <summary>
+        /// YieldAsync gives Outlook's UI thread a turn: it must complete on a
+        /// thread other than the target, and must run the posted no-op on the
+        /// target thread (so the UI loop has serviced its own messages first).
+        /// </summary>
+        [Fact]
+        public async Task YieldAsync_ReturnsWithoutBlocking_AndRunsOnTargetThread()
+        {
+            using (var ctx = new SingleThreadSyncContext())
+            {
+                var marshaller = new OutlookThreadMarshaller(ctx, ctx.WorkerThreadId);
+                int ranOn = -1;
+                // Post a marker ahead of the yield's no-op, so when our
+                // continuation observes completion the queue is drained.
+                ctx.Post(_ => ranOn = Thread.CurrentThread.ManagedThreadId, null);
+                await marshaller.YieldAsync(CancellationToken.None);
+                Assert.Equal(ctx.WorkerThreadId, ranOn);
+            }
+        }
+
+        /// <summary>
+        /// On the target (UI) thread there is nothing to yield to, and
+        /// posting + waiting there would deadlock. YieldAsync must return
+        /// completed instead.
+        /// </summary>
+        [Fact]
+        public void YieldAsync_OnTargetThread_CompletesSynchronously()
+        {
+            using (var ctx = new SingleThreadSyncContext())
+            {
+                var marshaller = new OutlookThreadMarshaller(ctx, ctx.WorkerThreadId);
+                bool completedOnWorker = false;
+                ctx.Send(_ =>
+                {
+                    var task = marshaller.YieldAsync(CancellationToken.None);
+                    completedOnWorker = task.IsCompleted;
+                }, null);
+                Assert.True(completedOnWorker);
+            }
+        }
+
+        /// <summary>
         /// Minimal single-thread SynchronizationContext. The worker thread
         /// drains posted callbacks until the context is disposed. Exposes
         /// its worker's managed-thread-id for assertions.
